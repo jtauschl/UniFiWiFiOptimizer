@@ -1,0 +1,8 @@
+.DS_Store
+.claude/
+
+# Credentials - never commit
+config.yaml
+
+# Design source files (keep locally, not useful in repo)
+*.psd
