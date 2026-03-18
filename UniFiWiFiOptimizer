@@ -46,7 +46,8 @@ OVERLAP_DIST=60   # overlap point as % of AP-to-AP distance (~20% area overlap)
 CORRIDOR_WIDTH=6  # corridor width in dB
 #
 # Path loss exponent n: set environment per site in config.yaml (default: Residential)
-# Values based on ITU-R P.1238-13, Table 2 (1.8–2.0 GHz)
+# Values are derived from ITU-R P.1238 Table 2, using n where ITU expresses
+# the same coefficient as N = 10*n.
 #   Preset        n     ΔdB    TX_LO   ITU-R P.1238 category
 #   Open          2.2   4.88   −72     Commercial (large open spaces, retail)
 #   Residential   2.8   6.21   −73     Residential (default)
@@ -1592,30 +1593,16 @@ case "${1:-}" in
     ;;
   --sites)
     [[ $# -eq 1 ]] || { print_usage >&2; exit 1; }
-    MODE="show-sites"
+    MODE="sites"
     ;;
   --site)
     [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
-    MODE="show-site-env"
+    MODE="site"
     SITE_SELECTOR=$2
     ;;
   --config)
     [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
-    MODE="print-config-skeleton"
-    SITE_SELECTOR=$2
-    ;;
-  --show-sites)
-    [[ $# -eq 1 ]] || { print_usage >&2; exit 1; }
-    MODE="show-sites"
-    ;;
-  --show-site-env)
-    [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
-    MODE="show-site-env"
-    SITE_SELECTOR=$2
-    ;;
-  --print-config-skeleton)
-    [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
-    MODE="print-config-skeleton"
+    MODE="config"
     SITE_SELECTOR=$2
     ;;
   -h|--help)
@@ -1633,17 +1620,17 @@ require_config_file
 load_controller_config
 
 case "$MODE" in
-  show-sites)
+  sites)
     fetch_controller_sites
     show_sites
     exit 0
     ;;
-  show-site-env)
+  site)
     fetch_controller_sites
     show_site_env "$SITE_SELECTOR"
     exit 0
     ;;
-  print-config-skeleton)
+  config)
     fetch_controller_sites
     print_config_skeleton "$SITE_SELECTOR"
     exit 0

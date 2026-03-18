@@ -1,8 +1,13 @@
 # Algorithm
 
-Manual RF recommendations for UniFi access points. Does not write controller configuration and is not a replacement for site surveys.
+This document describes the RF model used by `UniFiWiFiOptimizer`.
+It explains the practical design target behind the calculations, the mathematical derivation of the RF corridor, and how the script turns AP-to-AP neighbor RSSI into concrete recommendations for transmit power, roaming assistance, and minimum RSSI.
 
-## 1. Design goal
+The model targets the long-established practical design goal of about 20% cell overlap at `-67 dBm`, adjusted for the configured RF environment such as open space, office, or obstructed layouts.
+
+WLAN profile checks are part of the project as supporting best-practice guidance, but they are not part of the RF calculation described here.
+
+## 1. Design Goal
 
 The script uses AP-to-AP neighbor RSSI as a proxy for cell overlap:
 
@@ -10,16 +15,16 @@ The script uses AP-to-AP neighbor RSSI as a proxy for cell overlap:
 - **Roaming Assistant** is fixed at the design overlap point (`ROAM_TARGET` = −67 dBm)
 - **Minimum RSSI** is derived from the lower corridor bound (`TX_LO`) and can be enabled selectively
 
-Recommendations need validation against real client requirements.
+The script implements this by comparing measured neighbor RSSI against a derived target corridor and converting the delta into per-radio recommendations.
 
-## 2. Data sources
+## 2. Data Sources
 
 1. **UniFi API** — radio settings: channel, TX power, TX limits, TX mode, Minimum RSSI, Roaming Assistant
 2. **SSH** — AP-to-AP neighbor BSS scans on 2.4 and 5 GHz
 
-Assumptions: scan interfaces `apcli0`/`apclii0`, BSSIDs derived from base MAC via offsets +1/+2.
+In the current implementation, the script assumes scan interfaces `apcli0` and `apclii0`, and derives target BSSIDs from the AP base MAC via offsets `+1` and `+2`.
 
-## 3. Neighbor evaluation
+## 3. Neighbor Evaluation
 
 For each neighbor relationship, the script collects:
 
@@ -27,7 +32,7 @@ For each neighbor relationship, the script collects:
 
 This is the only direction affected by the current AP's TX power. From all values per band, the script derives `avg_neighbor_rssi`.
 
-## 4. TX Power heuristic
+## 4. TX Power Heuristic
 
 ### Calculation
 
@@ -40,7 +45,7 @@ recommended_tx  = clamp(current_tx + quantized_shift, radio_min_tx, radio_max_tx
 
 The quantization bias favors stronger TX: positive shifts round up (ceiling), negative shifts round towards zero.
 
-### TX Power hysteresis
+### TX Power Hysteresis
 
 ±1 dBm changes to the suggested TX power are suppressed unless the result hits a hardware boundary:
 
@@ -62,7 +67,7 @@ Warnings appear only when the uncapped TX recommendation **exceeds a hardware li
 
 Affected neighbors are flagged with `*`. This typically indicates uneven AP spacing or obstacles.
 
-## 5. TX corridor derivation
+## 5. TX Corridor Derivation
 
 The corridor is derived from a common voice-oriented WLAN design rule of thumb: target about **20% cell overlap at −67 dBm**. At 60% of the AP-to-AP distance, the received signal must be at least −67 dBm.
 
@@ -82,9 +87,11 @@ TX_HI = TX_LO + CORRIDOR_WIDTH
 | `OVERLAP_DIST` | 60% | ~20% cell area overlap → 60% of AP-to-AP distance |
 | `CORRIDOR_WIDTH` | 6 dB | Symmetric tolerance around corridor center |
 
-### Environment presets
+`CORRIDOR_WIDTH` is a practical tolerance around the target overlap corridor. The current value of `6 dB` provides enough margin for normal variation and asymmetry without making the target corridor too loose to be useful.
 
-Path loss exponent `n` is set per site in `config.yaml` via `environment:`. Values are based on ITU-R P.1238-13, Table 2 (1.8–2.0 GHz):
+### Environment Presets
+
+Path loss exponent `n` is set per site in `config.yaml` via `environment:`. The script uses the usual path loss exponent form, while ITU-R P.1238 Table 2 lists the corresponding distance loss coefficient `N` in the form `L = L(d0) + N*log10(d/d0) + Lf`. In other words, `N = 10*n`, so the implementation uses `2.8` where ITU lists `28`, `3.0` where ITU lists `30`, and so on.
 
 | Preset | n | ΔdB | TX_LO | TX_HI | ITU-R P.1238 category |
 |--------|---|-----|-------|-------|-----------------------|
@@ -125,18 +132,14 @@ The asymmetric 60%/40% overlap design reduces ping-pong risk:
 | Roaming Assistant | −67 dBm | Yes |
 | Minimum RSSI | `TX_LO` | Use selectively |
 
-## 8. Limits
+## 8. Model Limits
 
-- does not write controller configuration — generates recommendations only
 - uses AP-to-AP RSSI as proxy, not client telemetry
 - assumes known neighbor relationship
 - does not evaluate channel planning, SNR, retry rate, or capacity
-- AP recommendations cover 2.4 and 5 GHz; 6 GHz is profile-only
-- depends on model-specific interface naming and MAC derivation
 
 ## References
 
-- **ITU-R P.1238-13**: indoor path loss exponents by environment
+- **ITU-R P.1238-10**: [Propagation data and prediction methods for the planning of indoor radiocommunication systems and radio local area networks in the frequency range 300 MHz to 450 GHz](https://www.itu.int/dms_pubrec/itu-r/rec/p/R-REC-P.1238-10-201908-S!!PDF-E.pdf)
 - **Cisco**: [Site Survey Guidelines for WLAN Deployment](https://www.cisco.com/c/en/us/support/docs/wireless/5500-series-wireless-controllers/116057-site-survey-guidelines-wlan-00.html) — voice cell edge at −67 dBm, 20% overlap
 - **Ubiquiti**: [Understanding and Implementing Minimum RSSI](https://help.ui.com/hc/en-us/articles/221321728-Understanding-and-Implementing-Minimum-RSSI)
-- **Ubiquiti**: [UniFi WiFi SSID and AP Settings Overview](https://help.ui.com/hc/en-us/articles/32065480092951-UniFi-WiFi-SSID-level-Settings-Overview)

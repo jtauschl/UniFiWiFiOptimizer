@@ -1,6 +1,6 @@
-# Example Workflow
+# Walkthrough
 
-This document shows a five-AP example for `UniFiWiFiOptimizer`.
+This walkthrough uses a five-AP example for `UniFiWiFiOptimizer`.
 It starts with a minimal controller-only config, then shows how to discover the site, generate a site config block, and complete the `neighbors` model.
 
 <p align="center">
@@ -27,11 +27,12 @@ The neighbor list describes where clients are expected to roam between APs:
 
 ## 1. Set Up API and SSH Access
 
-In UniFi Network:
+In the UniFi Network Application (web UI):
 
 - enable `Device SSH Authentication`
-- set a device SSH password or add an SSH key
-- create an API key
+- set a device SSH password there, or keep passwordless SSH
+- if you want passwordless SSH, add your public key under `Settings` -> `System` -> `Advanced` -> `Device Authentication` -> `SSH Keys`
+- create a UniFi Network API key under `Integrations` or `Control Plane` -> `Integrations`, depending on the version; do not use the Site Manager API
 
 Create `config.yaml` from the minimal starter:
 
