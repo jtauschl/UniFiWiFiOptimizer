@@ -496,6 +496,7 @@ import sys
 
 site_name, neighbors_path, wlans_path, devices_path, site_wlans_path = sys.argv[1:]
 required = set()
+required_order = []
 required_wlans = set()
 
 with open(neighbors_path, "r", encoding="utf-8") as handle:
@@ -506,8 +507,13 @@ with open(neighbors_path, "r", encoding="utf-8") as handle:
         current_site, ap_name, peers = line.split("\t", 2)
         if current_site != site_name:
             continue
+        if ap_name not in required:
+            required_order.append(ap_name)
         required.add(ap_name)
-        required.update(peer for peer in peers.split(",") if peer)
+        for peer in (peer for peer in peers.split(",") if peer):
+            if peer not in required:
+                required_order.append(peer)
+            required.add(peer)
 
 with open(wlans_path, "r", encoding="utf-8") as handle:
     for line in handle:
@@ -567,7 +573,7 @@ if missing_wlans:
     sys.exit(1)
 
 not_ready = []
-for ap_name in sorted(required):
+for ap_name in required_order:
     ap = aps[ap_name]
     ip = ap.get("ip") or ap.get("inform_ip") or ""
     if not ip:
