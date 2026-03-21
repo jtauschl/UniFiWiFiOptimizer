@@ -1,0 +1,2006 @@
+#!/usr/bin/env bash
+
+#
+# UniFi WiFi Optimizer
+#
+# Determines TX Power and Roaming Assistant recommendations, plus
+# Minimum RSSI guidance, based on neighbor RSSI measurements
+# from neighbor APs.
+#
+# Algorithm: See docs/ALGORITHM.md
+# Config:    See config.yaml and profiles.yaml
+#
+# Usage:
+#   ./unifiwifioptimizer
+#   ./unifiwifioptimizer --sites
+#   ./unifiwifioptimizer --site <siteid>
+#   ./unifiwifioptimizer --config <siteid>
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
+PROFILES_FILE="${SCRIPT_DIR}/profiles.yaml"
+WLAN_FIELD_SEP=$'\037'
+
+# Default optimizer parameters
+#
+# Design basis (Cisco VoWLAN guidelines):
+#   CELL_EDGE      = -67 dBm   minimum RSSI at cell edge for voice
+#   CELL_OVERLAP   =  20 %     cell area overlap between neighbor APs
+#
+# Derived constants:
+#   ROAM_TARGET    = -67 dBm   roaming threshold at the overlap point
+#   OVERLAP_DIST   =  60 %     distance ratio corresponding to ~20% area overlap
+#   CORRIDOR_WIDTH =   6 dB    symmetric tolerance around corridor center
+#
+# TX corridor derivation (per site, using path loss exponent n):
+#     ΔdB   = 10 · n · log10(100 / OVERLAP_DIST)
+#     TX_LO = ROAM_TARGET − ΔdB
+#     TX_HI = TX_LO + CORRIDOR_WIDTH
+#
+#   n is site-specific, set via config.yaml (sites.<site>.environment).
+ROAM_TARGET=-67   # RSSI at the overlap point (dBm) — Cisco VoWLAN: -67 dBm cell edge
+OVERLAP_DIST=60   # overlap point as % of AP-to-AP distance (~20% area overlap)
+CORRIDOR_WIDTH=6  # corridor width in dB
+#
+# Path loss exponent n: set environment per site in config.yaml (default: Residential)
+# Values are derived from ITU-R P.1238 Table 2, using n where ITU expresses
+# the same coefficient as N = 10*n.
+#   Preset        n     ΔdB    TX_LO   ITU-R P.1238 category
+#   Open          2.2   4.88   −72     Commercial (large open spaces, retail)
+#   Residential   2.8   6.21   −73     Residential (default)
+#   Office        3.0   6.65   −74     Office
+#   Obstructed    4.0   8.87   −76     Obstructed (concrete, brick, multi-wall)
+#   <number>      x     —      —       Custom value (e.g. 3.5 → TX_LO ≈ −75)
+#
+# Conservative fallback limits if the controller does not expose per-radio
+# TX min/max values. QUANTIZATION controls recommendation step size in dBm.
+TX_MIN=6
+TX_MAX=23
+QUANTIZATION=1
+
+# Output colors and label widths used by the terminal report
+RED=$'\e[31m'
+YELLOW=$'\e[33m'
+GREEN=$'\e[32m'
+CYAN=$'\e[36m'
+RESET=$'\e[0m'
+GENERAL_LABEL_WIDTH=32
+REC_LABEL_WIDTH=24
+
+# Create and clean up temp dir for controller snapshots, parsed TSV data,
+# and AP scan output collected during this run.
+tmpdir=$(mktemp -d)
+trap '[[ -n "$tmpdir" && -d "$tmpdir" ]] && rm -rf "$tmpdir"' EXIT
+
+# Temporary files used throughout the run
+ENV_FILE="${tmpdir}/controller.env"
+SITES_FILE="${tmpdir}/sites.tsv"
+WLANS_FILE="${tmpdir}/wlans.tsv"
+NEIGHBORS_FILE="${tmpdir}/neighbors.tsv"
+PROFILES_TSV="${tmpdir}/profiles.tsv"
+APS_FILE="${tmpdir}/aps.tsv"
+CONTROLLER_SITES_FILE="${tmpdir}/controller-sites.txt"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+print_usage() {
+  cat <<'EOF'
+Usage:
+  ./unifiwifioptimizer
+  ./unifiwifioptimizer --sites
+  ./unifiwifioptimizer --site <siteid>
+  ./unifiwifioptimizer --config <siteid>
+EOF
+}
+
+require_config_file() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+    exit 1
+  fi
+}
+
+require_profiles_file() {
+  if [[ ! -f "$PROFILES_FILE" ]]; then
+    echo "ERROR: Profiles file not found: $PROFILES_FILE" >&2
+    exit 1
+  fi
+}
+
+load_controller_config() {
+  ruby - "$CONFIG_FILE" "$tmpdir" <<'RUBY'
+require "yaml"
+require "shellwords"
+
+config_path, out_dir = ARGV
+config = YAML.load_file(config_path) || {}
+controller = config["controller"] || {}
+
+abort("ERROR: config.yaml is missing controller.url") if controller["url"].to_s.empty?
+abort("ERROR: config.yaml is missing controller.api_key") if controller["api_key"].to_s.empty?
+
+env_lines = []
+env_lines << "UNIFI_URL=#{Shellwords.escape(controller['url'].to_s)}"
+env_lines << "UNIFI_API_KEY=#{Shellwords.escape(controller['api_key'].to_s)}"
+File.write(File.join(out_dir, "controller.env"), env_lines.join("\n") + "\n")
+RUBY
+
+  # shellcheck source=/dev/null
+  . "$ENV_FILE"
+}
+
+check_dependencies() {
+  local missing=()
+  local cmd
+
+  for cmd in awk curl python3 ruby ssh; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+
+  if awk -F '\t' 'NF >= 5 && $5 != "" { found=1 } END { exit found ? 0 : 1 }' "$SITES_FILE"; then
+    if ! command -v sshpass >/dev/null 2>&1; then
+      missing+=("sshpass")
+    fi
+  fi
+
+  if (( ${#missing[@]} > 0 )); then
+    printf 'ERROR: Missing required command(s): %s\n' "${missing[*]}" >&2
+    if [[ " ${missing[*]} " == *" sshpass "* ]]; then
+      printf '%s\n' "Omit sites.<site>.ssh.password in config.yaml to use SSH key authentication instead." >&2
+    fi
+    exit 1
+  fi
+}
+
+load_yaml_config() {
+  ruby - "$CONFIG_FILE" "$PROFILES_FILE" "$tmpdir" <<'RUBY'
+require "yaml"
+require "shellwords"
+
+config_path, profiles_path, out_dir = ARGV
+config = YAML.load_file(config_path) || {}
+profiles_doc = YAML.load_file(profiles_path) || {}
+
+controller = config["controller"] || {}
+sites = config["sites"] || {}
+profiles = profiles_doc["profiles"] || {}
+abort("ERROR: config.yaml is missing controller.url") if controller["url"].to_s.empty?
+abort("ERROR: config.yaml is missing controller.api_key") if controller["api_key"].to_s.empty?
+abort("ERROR: config.yaml must define at least one site under sites") if sites.empty?
+abort("ERROR: profiles.yaml must define at least one profile") if profiles.empty?
+
+env_lines = []
+env_lines << "UNIFI_URL=#{Shellwords.escape(controller['url'].to_s)}"
+env_lines << "UNIFI_API_KEY=#{Shellwords.escape(controller['api_key'].to_s)}"
+File.write(File.join(out_dir, "controller.env"), env_lines.join("\n") + "\n")
+
+File.write(File.join(out_dir, "sites.tsv"), "")
+File.write(File.join(out_dir, "wlans.tsv"), "")
+File.write(File.join(out_dir, "neighbors.tsv"), "")
+File.write(File.join(out_dir, "profiles.tsv"), "")
+
+profile_fields = %w[
+  wifi_bands
+  mlo
+  fast_roaming
+  minrate_mode
+  minrate_24_kbps
+  minrate_5_kbps
+  multicast_broadcast_blocker
+  multicast_to_unicast
+  proxy_arp
+  security_protocols
+  pmf
+  hide_wifi_name
+  client_device_isolation
+  sae_anti_clogging
+  sae_sync_time
+  bss_transition
+  uapsd
+  dtim_mode
+  dtim_24
+  dtim_5
+  dtim_6
+  group_rekey
+  ap_name_in_beacon
+]
+
+profiles.each do |name, values|
+  wifi_bands = Array(values["wifi_bands"]).map(&:to_s)
+  minrate_mode = values["minrate_mode"].to_s
+  dtim_mode = values["dtim_mode"].to_s
+  abort("ERROR: profile #{name}: minrate_mode must be auto or manual") unless %w[auto manual].include?(minrate_mode)
+  abort("ERROR: profile #{name}: dtim_mode must be default or custom") unless %w[default custom].include?(dtim_mode)
+  optional_fields = []
+  optional_fields << "mlo" unless wifi_bands.include?("6g")
+  if minrate_mode != "manual"
+    optional_fields << "minrate_24_kbps"
+    optional_fields << "minrate_5_kbps"
+  else
+    optional_fields << "minrate_24_kbps" unless wifi_bands.include?("2g")
+    optional_fields << "minrate_5_kbps" unless wifi_bands.include?("5g")
+  end
+  if dtim_mode != "custom"
+    optional_fields << "dtim_24"
+    optional_fields << "dtim_5"
+    optional_fields << "dtim_6"
+  else
+    optional_fields << "dtim_24" unless wifi_bands.include?("2g")
+    optional_fields << "dtim_5" unless wifi_bands.include?("5g")
+    optional_fields << "dtim_6" unless wifi_bands.include?("6g")
+  end
+
+  missing = profile_fields.reject do |field|
+    values.key?(field) || optional_fields.include?(field)
+  end
+  abort("ERROR: profile #{name} is missing keys: #{missing.join(', ')}") unless missing.empty?
+  defaults = {
+    "mlo" => false,
+    "minrate_mode" => "manual",
+    "minrate_24_kbps" => 0,
+    "minrate_5_kbps" => 0,
+    "dtim_mode" => "custom",
+    "dtim_24" => 0,
+    "dtim_5" => 0,
+    "dtim_6" => 0,
+  }
+  row = [name] + profile_fields.map do |field|
+    value = values.key?(field) ? values[field] : defaults[field]
+    value.is_a?(Array) ? value.join("|") : value
+  end
+  File.open(File.join(out_dir, "profiles.tsv"), "a") do |f|
+    f.puts(row.map(&:to_s).join("\t"))
+  end
+end
+
+sites.each do |site_name, site_cfg|
+  site_ssh = site_cfg["ssh"] || {}
+  ssh_user = site_ssh["user"].to_s
+  ssh_password = (site_ssh["password"] || "").to_s
+  neighbors = site_cfg["neighbors"] || {}
+  wlans = site_cfg["wlans"] || {}
+
+  abort("ERROR: site #{site_name} is missing ssh.user") if ssh_user.empty?
+  abort("ERROR: site #{site_name} must define neighbors") if neighbors.empty?
+
+  rf_presets = {
+    "open"        => [2.2, "Open"],
+    "residential" => [2.8, "Residential"],
+    "office"      => [3.0, "Office"],
+    "obstructed"  => [4.0, "Obstructed"],
+  }
+  rf_env = (site_cfg["environment"] || "Residential").to_s
+  rf_env_key = rf_env.downcase
+  if rf_presets.key?(rf_env_key)
+    n, env_label = rf_presets[rf_env_key]
+  else
+    n = rf_env.to_f
+    abort("ERROR: site #{site_name}: environment must be Open, Residential, Office, Obstructed, or a positive number (got: #{rf_env})") unless n > 0
+    env_label = "Custom (n=#{rf_env})"
+  end
+
+  File.open(File.join(out_dir, "sites.tsv"), "a") do |f|
+    f.puts([site_name, n, env_label, ssh_user, ssh_password].join("\t"))
+  end
+
+  wlans.each do |wlan_name, profile_name|
+    abort("ERROR: WLAN #{wlan_name} in site #{site_name} references unknown profile #{profile_name}") unless profiles.key?(profile_name)
+    File.open(File.join(out_dir, "wlans.tsv"), "a") do |f|
+      f.puts([site_name, wlan_name, profile_name].join("\t"))
+    end
+  end
+
+  neighbors.each do |ap_name, peers|
+    peer_list = Array(peers).map(&:to_s)
+    abort("ERROR: neighbors for #{ap_name} in site #{site_name} must list at least one peer") if peer_list.empty?
+    File.open(File.join(out_dir, "neighbors.tsv"), "a") do |f|
+      f.puts([site_name, ap_name, peer_list.join(",")].join("\t"))
+    end
+  end
+end
+RUBY
+
+  # shellcheck source=/dev/null
+  . "$ENV_FILE"
+}
+
+sanitize_token() {
+  printf '%s\n' "$1" | tr -c '[:alnum:]_.-' '_'
+}
+
+site_devices_json_path() {
+  local site=$1
+  printf "%s/%s.devices.json\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+site_wlans_tsv_path() {
+  local site=$1
+  printf "%s/%s.wlans.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+site_mgmt_json_path() {
+  local site=$1
+  printf "%s/%s.mgmt.json\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+load_site_ssh_credentials() {
+  local site=$1 creds
+  creds=$(awk -F '\t' -v site="$site" '$1 == site { print $4 "\t" $5; exit }' "$SITES_FILE")
+  if [[ -z "$creds" ]]; then
+    printf 'ERROR: Could not load SSH credentials for site "%s"\n' "$site" >&2
+    exit 1
+  fi
+  IFS=$'\t' read -r SITE_SSH_USER SITE_SSH_PASSWORD <<< "$creds"
+}
+
+fetch_controller_sites() {
+  curl -k -s --max-time 10 \
+    -H "X-API-KEY: ${UNIFI_API_KEY}" \
+    -H "Accept: application/json" \
+    "${UNIFI_URL}/proxy/network/api/self/sites" \
+    2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for site in d.get('data', []):
+        fields = [
+            site.get('name', ''),
+            site.get('desc', '') or site.get('name', ''),
+            site.get('attr_hidden_id', '') or site.get('name', ''),
+            site.get('device_count', ''),
+        ]
+        print('\t'.join(str(field).replace('\t', ' ') for field in fields))
+except Exception:
+    pass
+" 2>/dev/null > "$CONTROLLER_SITES_FILE"
+}
+
+validate_config_sites() {
+  local site _n _label _ssh_user _ssh_password
+  while IFS=$'\t' read -r site _n _label _ssh_user _ssh_password; do
+    [[ -z "$site" ]] && continue
+    if ! awk -F '\t' -v site="$site" '$1 == site { found=1 } END { exit found ? 0 : 1 }' "$CONTROLLER_SITES_FILE"; then
+      printf 'ERROR: Site "%s" from config.yaml was not found in the UniFi controller\n' "$site" >&2
+      exit 1
+    fi
+  done < "$SITES_FILE"
+}
+
+resolve_site_id() {
+  local site_id=$1
+  local match
+
+  match=$(awk -F '\t' -v site_id="$site_id" '$1 == site_id { print; exit }' "$CONTROLLER_SITES_FILE")
+  if [[ -n "$match" ]]; then
+    printf '%s\n' "$match"
+    return
+  fi
+
+  printf 'ERROR: Site ID "%s" was not found. Use --sites to list available site IDs.\n' "$site_id" >&2
+  exit 1
+}
+
+fetch_site_devices() {
+  local site=$1
+  curl -k -s --max-time 15 \
+    -H "X-API-KEY: ${UNIFI_API_KEY}" \
+    -H "Accept: application/json" \
+    "${UNIFI_URL}/proxy/network/api/s/${site}/stat/device" \
+    2>/dev/null > "$(site_devices_json_path "$site")"
+}
+
+fetch_site_wlan_info() {
+  local site=$1
+  curl -k -s --max-time 15 \
+    -H "X-API-KEY: ${UNIFI_API_KEY}" \
+    -H "Accept: application/json" \
+    "${UNIFI_URL}/proxy/network/api/s/${site}/list/wlanconf" \
+    2>/dev/null | python3 -c "
+import sys, json
+
+try:
+    d = json.load(sys.stdin)
+    sep = '\x1f'
+    for wlan in d.get('data', []):
+        fields = [
+            wlan.get('name', ''),
+            wlan.get('enabled', ''),
+            wlan.get('bss_transition', ''),
+            wlan.get('fast_roaming_enabled', ''),
+            wlan.get('minrate_setting_preference', ''),
+            wlan.get('minrate_ng_enabled', ''),
+            wlan.get('minrate_ng_data_rate_kbps', ''),
+            wlan.get('minrate_na_enabled', ''),
+            wlan.get('minrate_na_data_rate_kbps', ''),
+            wlan.get('bc_filter_enabled', ''),
+            wlan.get('mcastenhance_enabled', ''),
+            wlan.get('proxy_arp', ''),
+            wlan.get('wlan_band', ''),
+            '|'.join(wlan.get('wlan_bands', []) or []),
+            wlan.get('mlo_enabled', ''),
+            wlan.get('security', ''),
+            wlan.get('wpa_mode', ''),
+            wlan.get('wpa3_support', ''),
+            wlan.get('wpa3_transition', ''),
+            wlan.get('pmf_mode', ''),
+            wlan.get('hide_ssid', ''),
+            wlan.get('l2_isolation', ''),
+            wlan.get('sae_anti_clogging', ''),
+            wlan.get('sae_sync', ''),
+            wlan.get('uapsd_enabled', ''),
+            wlan.get('dtim_mode', ''),
+            wlan.get('dtim_ng', ''),
+            wlan.get('dtim_na', ''),
+            wlan.get('dtim_6e', ''),
+            wlan.get('group_rekey', ''),
+            wlan.get('advertise_device_name_in_beacon', ''),
+        ]
+        print(sep.join(str(field).replace(sep, ' ') for field in fields))
+except Exception:
+    pass
+" 2>/dev/null > "$(site_wlans_tsv_path "$site")"
+}
+
+fetch_site_mgmt_settings() {
+  local site=$1
+  curl -k -s --max-time 15 \
+    -H "X-API-KEY: ${UNIFI_API_KEY}" \
+    -H "Accept: application/json" \
+    "${UNIFI_URL}/proxy/network/api/s/${site}/rest/setting/mgmt" \
+    2>/dev/null > "$(site_mgmt_json_path "$site")"
+}
+
+count_site_access_points() {
+  local site=$1
+
+  fetch_site_devices "$site"
+  python3 - "$(site_devices_json_path "$site")" <<'PY'
+import json
+import sys
+
+devices_path = sys.argv[1]
+with open(devices_path, "r", encoding="utf-8") as handle:
+    data = json.load(handle).get("data", [])
+
+count = 0
+for device in data:
+    if device.get("type") == "uap" or device.get("is_access_point") is True:
+        count += 1
+
+print(count)
+PY
+}
+
+build_site_inventory() {
+  local site _n _label _ssh_user _ssh_password
+
+  : > "$APS_FILE"
+  fetch_controller_sites
+  validate_config_sites
+
+  while IFS=$'\t' read -r site _n _label _ssh_user _ssh_password; do
+    [[ -z "$site" ]] && continue
+    fetch_site_devices "$site"
+    fetch_site_wlan_info "$site"
+
+    python3 - "$site" "$NEIGHBORS_FILE" "$WLANS_FILE" "$(site_devices_json_path "$site")" "$(site_wlans_tsv_path "$site")" >> "$APS_FILE" <<'PY'
+import json
+import sys
+
+site_name, neighbors_path, wlans_path, devices_path, site_wlans_path = sys.argv[1:]
+required = set()
+required_order = []
+required_wlans = set()
+
+with open(neighbors_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        current_site, ap_name, peers = line.split("\t", 2)
+        if current_site != site_name:
+            continue
+        if ap_name not in required:
+            required_order.append(ap_name)
+        required.add(ap_name)
+        for peer in (peer for peer in peers.split(",") if peer):
+            if peer not in required:
+                required_order.append(peer)
+            required.add(peer)
+
+with open(wlans_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        current_site, wlan_name, _profile = line.split("\t", 2)
+        if current_site != site_name:
+            continue
+        required_wlans.add(wlan_name)
+
+with open(devices_path, "r", encoding="utf-8") as handle:
+    data = json.load(handle).get("data", [])
+
+aps = {}
+duplicates = set()
+for device in data:
+    if device.get("type") != "uap":
+        continue
+    name = device.get("name", "")
+    if name:
+        if name in aps:
+            duplicates.add(name)
+        aps[name] = device
+
+if duplicates:
+    sys.stderr.write(
+        f'ERROR: Duplicate AP names found in site "{site_name}": {", ".join(sorted(duplicates))}. '
+        'AP names must be unique per site for neighbor matching.\n'
+    )
+    sys.exit(1)
+
+missing = sorted(name for name in required if name not in aps)
+if missing:
+    sys.stderr.write(
+        f'ERROR: The following APs from config.yaml were not found in site "{site_name}": {", ".join(missing)}\n'
+    )
+    sys.exit(1)
+
+site_wlans = set()
+sep = "\x1f"
+with open(site_wlans_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        fields = line.split(sep)
+        if fields:
+            site_wlans.add(fields[0])
+
+missing_wlans = sorted(name for name in required_wlans if name not in site_wlans)
+if missing_wlans:
+    sys.stderr.write(
+        f'ERROR: The following WLANs from config.yaml were not found in site "{site_name}": {", ".join(missing_wlans)}\n'
+    )
+    sys.stderr.write("Check the wlans mapping, then run the script again.\n")
+    sys.exit(1)
+
+not_ready = []
+for ap_name in required_order:
+    ap = aps[ap_name]
+    ip = ap.get("ip") or ap.get("inform_ip") or ""
+    if not ip:
+        not_ready.append(f"{ap_name} (missing IP)")
+        continue
+    print("\t".join([site_name, ap_name, ap.get("mac", ""), ip]))
+
+if not_ready:
+    sys.stderr.write(
+        f'ERROR: The following APs in site "{site_name}" are not ready for SSH scanning: {", ".join(not_ready)}\n'
+    )
+    sys.stderr.write(
+        "Wait until they are online in UniFi Network, then run the script again.\n"
+    )
+    sys.exit(1)
+PY
+  done < "$SITES_FILE"
+}
+
+show_sites() {
+  local site_id site_name _hidden_id _device_count ap_count
+
+  if [[ ! -s "$CONTROLLER_SITES_FILE" ]]; then
+    echo "No UniFi sites were returned by the controller."
+    return
+  fi
+
+  echo
+  printf "  %-20s  %-24s  %s\n" "Site ID" "Site Name" "Access Points"
+  while IFS=$'\t' read -r site_id site_name _hidden_id _device_count; do
+    [[ -z "$site_id" ]] && continue
+    ap_count=$(count_site_access_points "$site_id")
+    printf "  %-20s  %-24s  %s\n" "$site_id" "$site_name" "$ap_count"
+  done < "$CONTROLLER_SITES_FILE"
+  echo
+}
+
+show_site_env() {
+  local selector=$1
+  local resolved site_id site_name _hidden_id _device_count
+
+  resolved=$(resolve_site_id "$selector")
+  IFS=$'\t' read -r site_id site_name _hidden_id _device_count <<< "$resolved"
+
+  fetch_site_devices "$site_id"
+  fetch_site_wlan_info "$site_id"
+
+  echo
+  printf "  Site ID:   %s\n" "$site_id"
+  printf "  Site Name: %s\n" "$site_name"
+  echo
+
+  echo "  WLANs:"
+  if [[ -s "$(site_wlans_tsv_path "$site_id")" ]]; then
+    awk -F "$WLAN_FIELD_SEP" '
+      {
+        status = ($2 == "True" || $2 == "true") ? "enabled" : "disabled"
+        printf "    %s (%s)\n", $1, status
+      }
+    ' "$(site_wlans_tsv_path "$site_id")" | sort
+  else
+    echo "    none"
+  fi
+  echo
+
+  echo "  Access Points:"
+  python3 - "$(site_devices_json_path "$site_id")" <<'PY'
+import json
+import sys
+
+devices_path = sys.argv[1]
+with open(devices_path, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+devices = []
+for device in data.get("data", []):
+    device_type = str(device.get("type", "")).lower()
+    if not (device_type == "uap" or device.get("is_access_point") is True):
+        continue
+
+    devices.append((
+        device.get("name", ""),
+        "ONLINE" if str(device.get("state", "")).lower() == "1" else str(device.get("state", "")),
+        device.get("ip", "") or device.get("inform_ip", ""),
+        device.get("mac", ""),
+    ))
+
+if not devices:
+    print("    none")
+else:
+    print("    Device Name   State   IP             MAC")
+    for name, state, ip, mac in sorted(devices, key=lambda row: row[0]):
+        print(f"    {name:<13} {state:<7} {ip:<14} {mac}")
+PY
+  echo
+}
+
+print_config_skeleton() {
+  local selector=$1
+  local resolved site_id site_name _hidden_id _device_count
+
+  resolved=$(resolve_site_id "$selector")
+  IFS=$'\t' read -r site_id site_name _hidden_id _device_count <<< "$resolved"
+
+  fetch_site_devices "$site_id"
+  fetch_site_wlan_info "$site_id"
+  fetch_site_mgmt_settings "$site_id"
+
+  python3 - "$site_id" "$(site_wlans_tsv_path "$site_id")" "$(site_devices_json_path "$site_id")" "$(site_mgmt_json_path "$site_id")" <<'PY'
+import json
+import sys
+
+site_id, wlans_path, devices_path, mgmt_path = sys.argv[1:]
+
+def yaml_scalar(value):
+    if value == "":
+        return '""'
+    safe = True
+    disallowed = set(':#{}[]&,*!?|>\'"% @`')
+    if value.strip() != value:
+        safe = False
+    if value.lower() in {"null", "~", "true", "false", "yes", "no", "on", "off"}:
+        safe = False
+    try:
+        float(value)
+        safe = False
+    except ValueError:
+        pass
+    if not value:
+        safe = False
+    if value[0] in "-?":
+        safe = False
+    if any(ch in disallowed for ch in value):
+        safe = False
+    if safe:
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{ escaped}"'
+
+wlans = []
+sep = "\x1f"
+
+with open(wlans_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        fields = line.split(sep)
+        if fields:
+            wlans.append(fields[0])
+
+with open(devices_path, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+ssh_user = "YOUR_SSH_USER"
+try:
+    with open(mgmt_path, "r", encoding="utf-8") as handle:
+        mgmt_doc = json.load(handle)
+    mgmt_items = mgmt_doc.get("data", [])
+    if mgmt_items:
+        candidate = (mgmt_items[0].get("x_ssh_username") or "").strip()
+        if candidate:
+            ssh_user = candidate
+except Exception:
+    pass
+
+aps = sorted(
+    device.get("name", "")
+    for device in data.get("data", [])
+    if (device.get("type") == "uap" or device.get("is_access_point") is True) and device.get("name")
+)
+
+print("")
+print("sites:")
+print(f"  {yaml_scalar(site_id)}:")
+print("    ssh:")
+print(f"      user: {yaml_scalar(ssh_user)}")
+print("      # Set a password or remove this line for SSH key-based login.")
+print("      password: YOUR_SSH_PASSWORD")
+print("")
+print("    # Open, Residential, Office, Obstructed, or a custom path-loss exponent")
+print("    environment: Residential")
+print("")
+print("    # Standard, IoT, Hotspot, Throughput, or Latency")
+print("    wlans:")
+if wlans:
+    for wlan in sorted(set(wlans)):
+        print(f"      {yaml_scalar(wlan)}: Throughput")
+else:
+    print("      # Add WLAN mappings here")
+print("")
+print("    # Add neighbor AP names as a comma-separated list in brackets.")
+print("    neighbors:")
+if aps:
+    for ap in aps:
+        print(f"      {yaml_scalar(ap)}: []")
+else:
+    print("      # Add AP neighbor relationships here")
+print("")
+PY
+}
+
+ssh_scan_ap() {
+  local host="$1"
+  local ssh_password="${2:-}"
+  local scan_script
+  read -r -d '' scan_script <<'SCAN' || true
+# Return space-separated scan interface candidates for the given band.
+# Tries known static names first (U6: apcli0/apclii0), then discovers
+# additional candidates by matching channel frequency via iw dev.
+find_scan_candidates() {
+  band="$1"
+  case "$band" in
+    2g) freq_min=2400; freq_max=2500; static="apcli0 apcli2" ;;
+    5g) freq_min=5000; freq_max=6000; static="apclii0 apcli1 apcli3" ;;
+    *) return 1 ;;
+  esac
+
+  discovered=""
+  for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+    freq=$(iw dev "$iface" info 2>/dev/null \
+      | awk '/channel/ { gsub(/[()]/,"",$4); f=$4+0; if (f>0) print f; exit }')
+    if [ -n "$freq" ] && [ "$freq" -ge "$freq_min" ] && [ "$freq" -lt "$freq_max" ]; then
+      case " $static " in
+        *" $iface "*) ;;
+        *) discovered="$discovered $iface" ;;
+      esac
+    fi
+  done
+
+  echo "$static$discovered"
+}
+
+run_scan() {
+  candidates="$1"
+  outfile="$2"
+  iface=""
+  scan_output=""
+
+  : > "$outfile"
+
+  for iface in $candidates; do
+    if ! iw dev "$iface" info >/dev/null 2>&1; then
+      continue
+    fi
+
+    ifconfig "$iface" up 2>/dev/null
+    sleep 1
+    scan_output=$(iw dev "$iface" scan 2>/dev/null | grep -E 'BSS|signal|SSID' || true)
+    ifconfig "$iface" down 2>/dev/null
+
+    if [ -n "$scan_output" ]; then
+      printf '%s\n' "$scan_output" > "$outfile"
+      return 0
+    fi
+  done
+}
+
+scan2g_candidates=$(find_scan_candidates 2g)
+scan5g_candidates=$(find_scan_candidates 5g)
+
+run_scan "$scan2g_candidates" /tmp/scan2g.txt
+run_scan "$scan5g_candidates" /tmp/scan5g.txt
+
+cat /tmp/scan2g.txt
+echo "===5GHZ==="
+cat /tmp/scan5g.txt
+rm /tmp/scan2g.txt /tmp/scan5g.txt 2>/dev/null
+SCAN
+
+  local ssh_opts=(
+    -o ConnectTimeout=5
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o NumberOfPasswordPrompts=1
+    -T
+  )
+
+  if [[ -n "$ssh_password" ]]; then
+    SSHPASS="$ssh_password" sshpass -e ssh \
+      -o PreferredAuthentications=password,keyboard-interactive \
+      -o PubkeyAuthentication=no \
+      -o KbdInteractiveAuthentication=yes \
+      "${ssh_opts[@]}" "$host" 'sh -s' <<< "$scan_script"
+    return
+  fi
+
+  ssh "${ssh_opts[@]}" "$host" 'sh -s' <<< "$scan_script"
+}
+
+mac_with_offset() {
+  local mac=$1 offset=$2 hex dec new
+  hex=${mac//:/}
+  dec=$((16#$hex))
+  new=$(((dec + offset) & 0xFFFFFFFFFFFF))
+  hex=$(printf '%012x' "$new")
+  printf '%s:%s:%s:%s:%s:%s\n' \
+    "${hex:0:2}" "${hex:2:2}" "${hex:4:2}" \
+    "${hex:6:2}" "${hex:8:2}" "${hex:10:2}"
+}
+
+get_rssi() {
+  local mac=$1 file=$2
+  awk -v mac="$mac" '$1 == "BSS" && index($2, mac) == 1 { getline; r = $2 + 0; if (r < 0 && r > -100) print r; exit }' "$file" 2>/dev/null
+}
+
+get_peers() {
+  local site=$1 ap=$2
+  awk -F '\t' -v site="$site" -v ap="$ap" '$1 == site && $2 == ap { print $3; exit }' "$NEIGHBORS_FILE" | tr ',' ' '
+}
+
+# Output-variable convention: arithmetic helpers write their result to _result
+# instead of using echo + $(...) to avoid subshell forks. Callers must read
+# _result immediately after the call, e.g.: quantize "$val"; result=$_result
+
+# Round to nearest QUANTIZATION step, biased towards higher TX power:
+#   positive shift: ceiling (round up → more TX increase)
+#   negative shift: floor-towards-zero (round towards 0 → less TX reduction)
+quantize() {
+  local val=$1
+  local q=${QUANTIZATION:-3}
+  if (( val >= 0 )); then
+    _result=$(( (val + q - 1) / q * q ))
+  else
+    _result=$(( -((-val) / q * q) ))
+  fi
+}
+
+get_radio_info() {
+  local site=$1 ap=$2
+  # Placeholder with the exact number of pipe-separated fields expected by the
+  # read below. Used when radio parsing fails so the caller can apply defaults.
+  local empty_result='|||||||||||||||||||'
+
+  # Extract 2.4/5 GHz radio values via python3, accepting both
+  # older ra0/rai0 and newer wifi0/wifi1 naming.
+  local result
+  result=$(python3 - "$ap" "$(site_devices_json_path "$site")" "$empty_result" <<'PY'
+import sys, json
+
+def pick_radio(items, names, radios):
+    for entry in items:
+        if entry.get('name') in names:
+            return entry
+    for entry in items:
+        if entry.get('radio') in radios:
+            return entry
+    return {}
+
+ap_name, devices_path, empty_result = sys.argv[1:]
+
+try:
+    with open(devices_path, 'r', encoding='utf-8') as handle:
+        data = json.load(handle).get('data', [])
+    device = next((item for item in data if item.get('type') == 'uap' and item.get('name') == ap_name), None)
+    if device is None:
+        raise RuntimeError(f'AP not found: {ap_name}')
+    radios = device['radio_table']
+    r24 = pick_radio(radios, ('ra0', 'wifi0'), ('ng', '2g', '2.4', '2.4g'))
+    r5  = pick_radio(radios, ('rai0', 'wifi1'), ('na', '6e', '5g', '5', '5.8'))
+    ch24      = r24.get('channel', '')
+    ht24      = r24.get('ht', '')
+    tx24      = r24.get('tx_power', '')
+    min_tx24  = r24.get('min_txpower', '')
+    max_tx24  = r24.get('max_txpower', '')
+    rssi24    = r24.get('min_rssi', '')
+    min_rssi_en24 = r24.get('min_rssi_enabled', '')
+    ib24          = r24.get('sens_level_enabled', '') or r24.get('hard_noise_floor_enabled', '')
+    txmode24      = r24.get('tx_power_mode', '')
+    ch5           = r5.get('channel', '')
+    ht5           = r5.get('ht', '')
+    tx5           = r5.get('tx_power', '')
+    min_tx5       = r5.get('min_txpower', '')
+    max_tx5       = r5.get('max_txpower', '')
+    rssi5         = r5.get('min_rssi', '')
+    min_rssi_en5  = r5.get('min_rssi_enabled', '')
+    ib5           = r5.get('sens_level_enabled', '') or r5.get('hard_noise_floor_enabled', '')
+    txmode5       = r5.get('tx_power_mode', '')
+    roam_en   = r5.get('assisted_roaming_enabled', '')
+    roam_rssi = r5.get('assisted_roaming_rssi', '')
+    print(f'{ch24}|{ht24}|{tx24}|{min_tx24}|{max_tx24}|{txmode24}|{rssi24}|{min_rssi_en24}|{ch5}|{ht5}|{tx5}|{min_tx5}|{max_tx5}|{txmode5}|{rssi5}|{min_rssi_en5}|{roam_en}|{roam_rssi}|{ib24}|{ib5}')
+except Exception as e:
+    import sys as _sys
+    print(f'WARNING: get_radio_info failed for AP "{ap_name}": {e}', file=_sys.stderr)
+    print(empty_result)
+PY
+)
+
+  echo "$result"
+}
+
+cap_tx_power() {
+  local tx=$1 min_tx=${2:-$TX_MIN} max_tx=${3:-$TX_MAX}
+  (( tx < min_tx )) && tx=$min_tx
+  (( tx > max_tx )) && tx=$max_tx
+  _result=$tx
+}
+
+# ============================================================================
+# TX Power Calculation (ALGORITHM.md §5)
+# ============================================================================
+# Writes SIGNED shift value to _result:
+#   positive = increase TX power needed
+#   negative = decrease TX power needed
+#
+# Target: bring the average RSSI @ Neighbor to the center of the TX corridor.
+# The caller applies quantize() and cap_tx_power() afterwards.
+
+calculate_tx_shift() {
+  local avg=$1
+  local corridor_center=$(( TX_LO + CORRIDOR_WIDTH / 2 ))
+  _result=$(( corridor_center - avg ))
+}
+
+# ============================================================================
+# Minimum RSSI Calculation (ALGORITHM.md §6)
+# ============================================================================
+# Minimum RSSI is always recommended as TX_LO — the lower bound of the TX
+# corridor. This is the point where the neighboring cell is clearly stronger
+# and a hard disconnect makes sense if Minimum RSSI is enabled at all.
+
+calculate_min_rssi_recommendation() {
+  _result=$TX_LO
+}
+
+# ============================================================================
+# Output Functions
+# ============================================================================
+
+# Normalize UniFi-style booleans from multiple controller/API variants.
+is_true() {
+  case "$1" in
+    True|true|TRUE|1|Yes|yes|YES|On|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+bool_state() {
+  is_true "$1" && echo "Enabled" || echo "Disabled"
+}
+
+rate_mbps() {
+  local kbps=$1 whole rem frac
+  whole=$(( kbps / 1000 ))
+  rem=$(( kbps % 1000 ))
+  if (( rem == 0 )); then
+    echo "$whole"
+    return
+  fi
+
+  frac=$(printf '%03d' "$rem")
+  while [[ "$frac" == *0 ]]; do
+    frac=${frac%0}
+  done
+  printf '%d.%s\n' "$whole" "$frac"
+}
+
+pmf_state() {
+  case "$1" in
+    required|Required) echo "Required" ;;
+    optional|Optional) echo "Optional" ;;
+    disabled|Disabled|"") echo "Disabled" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+security_protocol_state() {
+  local security=$1 wpa_mode=$2 wpa3_support=$3 wpa3_transition=$4
+  local enterprise=false
+
+  case "$security" in
+    wpaeap|wpa-enterprise|enterprise) enterprise=true ;;
+  esac
+
+  if [[ "$security" == "open" ]]; then
+    echo "Open"
+  elif [[ "$enterprise" == "true" ]] && is_true "$wpa3_support" && is_true "$wpa3_transition"; then
+    echo "WPA2/WPA3 Enterprise"
+  elif [[ "$enterprise" == "true" ]] && is_true "$wpa3_support"; then
+    echo "WPA3 Enterprise"
+  elif [[ "$enterprise" == "true" ]] && [[ "$wpa_mode" == "wpa2" ]]; then
+    echo "WPA2 Enterprise"
+  elif is_true "$wpa3_support" && is_true "$wpa3_transition"; then
+    echo "WPA2/WPA3"
+  elif is_true "$wpa3_support"; then
+    echo "WPA3"
+  elif [[ "$wpa_mode" == "wpa2" ]]; then
+    echo "WPA2"
+  else
+    echo "${security:-Unknown}"
+  fi
+}
+
+security_protocol_uses_sae() {
+  case "$1" in
+    WPA3|WPA2/WPA3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_wifi_bands() {
+  local band=$1 bands=$2
+  local source="${bands:-$band}"
+  local normalized=""
+
+  case "$source" in
+    *2g*|*both*|*all*)
+      normalized="2g"
+      ;;
+  esac
+
+  case "$source" in
+    *5g*)
+      normalized="${normalized:+${normalized}|}5g"
+      ;;
+    *both*|*all*)
+      [[ "$normalized" != *5g* ]] && normalized="${normalized:+${normalized}|}5g"
+      ;;
+  esac
+
+  case "$source" in
+    *6g*|*6e*|*all*)
+      normalized="${normalized:+${normalized}|}6g"
+      ;;
+  esac
+
+  echo "$normalized"
+}
+
+wifi_bands_state() {
+  local normalized=$1
+  case "$normalized" in
+    2g) echo "2.4 GHz only" ;;
+    5g) echo "5 GHz only" ;;
+    6g) echo "6 GHz only" ;;
+    2g\|5g) echo "2.4 GHz, 5 GHz" ;;
+    2g\|6g) echo "2.4 GHz, 6 GHz" ;;
+    5g\|6g) echo "5 GHz, 6 GHz" ;;
+    2g\|5g\|6g) echo "2.4 GHz, 5 GHz, 6 GHz" ;;
+    "") echo "n/a" ;;
+    *) echo "$normalized" ;;
+  esac
+}
+
+wifi_band_includes() {
+  local normalized=$1 target=$2
+  case "|$normalized|" in
+    *"|$target|"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+security_protocol_allowed() {
+  local allowed=$1 current=$2 item
+  IFS='|' read -r -a allowed_items <<< "$allowed"
+  for item in "${allowed_items[@]}"; do
+    [[ "$item" == "$current" ]] && return 0
+  done
+  return 1
+}
+
+security_protocol_expected_state() {
+  local allowed=$1
+  echo "${allowed//|/, }"
+}
+
+rekey_state() {
+  local seconds=$1
+  if [[ -z "$seconds" || "$seconds" == "0" || "$seconds" == "disabled" || "$seconds" == "Disabled" ]]; then
+    echo "Disabled"
+  else
+    echo "${seconds} s"
+  fi
+}
+
+normalize_rekey() {
+  local value=$1
+  if [[ -z "$value" || "$value" == "0" || "$value" == "disabled" || "$value" == "Disabled" ]]; then
+    echo "0"
+  else
+    echo "$value"
+  fi
+}
+
+normalize_minrate_mode() {
+  local value
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    auto|"") echo "auto" ;;
+    manual) echo "manual" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+minrate_mode_state() {
+  case "$(normalize_minrate_mode "$1")" in
+    auto) echo "Auto" ;;
+    manual) echo "Manual" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+normalize_dtim_mode() {
+  local value
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    default|"") echo "default" ;;
+    custom) echo "custom" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+dtim_mode_state() {
+  case "$(normalize_dtim_mode "$1")" in
+    default) echo "Default" ;;
+    custom) echo "Custom" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+print_general_check_minrate_mode() {
+  local current=$1 expected=$2
+  local current_norm expected_norm current_state expected_state
+  current_norm=$(normalize_minrate_mode "$current")
+  expected_norm=$(normalize_minrate_mode "$expected")
+  current_state=$(minrate_mode_state "$current_norm")
+  expected_state=$(minrate_mode_state "$expected_norm")
+
+  if [[ "$current_norm" == "$expected_norm" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "Minimum Data Rate Mode" "$current_state"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "Minimum Data Rate Mode" "$expected_state"
+  fi
+}
+
+print_general_check_dtim_mode() {
+  local current=$1 expected=$2
+  local current_norm expected_norm current_state expected_state
+  current_norm=$(normalize_dtim_mode "$current")
+  expected_norm=$(normalize_dtim_mode "$expected")
+  current_state=$(dtim_mode_state "$current_norm")
+  expected_state=$(dtim_mode_state "$expected_norm")
+
+  if [[ "$current_norm" == "$expected_norm" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "DTIM Mode" "$current_state"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "DTIM Mode" "$expected_state"
+  fi
+}
+
+get_profile_row() {
+  local profile=$1
+  awk -F '\t' -v profile="$profile" '$1 == profile { print; exit }' "$PROFILES_TSV"
+}
+
+get_site_wlan_row() {
+  # site selects the TSV file (one file per site); the awk filter only needs wlan_name
+  local site=$1 wlan_name=$2
+  awk -F "$WLAN_FIELD_SEP" -v wlan_name="$wlan_name" '$1 == wlan_name { print; exit }' "$(site_wlans_tsv_path "$site")"
+}
+
+print_header() {
+  local title
+  title="UniFi WiFi Optimizer - $(date +'%Y-%m-%d %H:%M:%S %Z')"
+  echo
+  echo "╔════════════════════════════════════════════════════════════════╗"
+  printf "║ %8s%-54s ║\n" "" "$title"
+  echo "╚════════════════════════════════════════════════════════════════╝"
+  echo
+}
+
+print_ap_header() {
+  local ap=$1 mac=$2
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "  ${CYAN}AP${RESET}         %s\n" "$ap"
+  printf "  ${CYAN}MAC${RESET}        %s\n" "$mac"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+}
+
+print_site_header() {
+  local site=$1
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "  ${CYAN}Site${RESET}       %s\n" "$site"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+}
+
+print_environment_header() {
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf '  %sEnvironment%s\n' "$CYAN" "$RESET"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+}
+
+print_wlan_header() {
+  local wlan_name=$1 profile_name=$2
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "  ${CYAN}WLAN${RESET}       %s\n" "$wlan_name"
+  printf "  ${CYAN}Profile${RESET}    %s\n" "$profile_name"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+}
+
+print_general_group_header() {
+  local title=$1
+  printf "  %s\n" "$title"
+}
+
+print_channel_info() {
+  local band=$1 ht=$2 channel=$3 tx=$4
+  printf "  ${CYAN}%s GHz${RESET}  (Channel Width: %s MHz, Channel: %s, TX Power: %s dBm)\n" \
+    "$band" "$ht" "$channel" "$tx"
+  echo
+}
+
+print_neighbor_header() {
+  printf "  %-15s  %s\n" "Neighbor AP:" "RSSI @ Neighbor:"
+}
+
+print_neighbor_row() {
+  local peer=$1 rssi=$2 starred=${3:-}
+  local rssi_str="${rssi} dBm"
+  [[ -n "$starred" ]] && rssi_str+=" *"
+  printf "  %-14s  %s\n" "$peer" "$rssi_str"
+}
+
+print_recommendations_header() {
+  echo
+  echo "  Recommendations:"
+}
+
+flag_change() { has_changes=true; }
+
+print_general_check_bool() {
+  local label=$1 expected=$2 current=$3
+  local expected_state actual_state
+  expected_state=$(bool_state "$expected")
+  actual_state=$(bool_state "$current")
+
+  if { is_true "$expected" && is_true "$current"; } || { ! is_true "$expected" && ! is_true "$current"; }; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$actual_state"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
+      "$label" "$expected_state"
+  fi
+}
+
+print_general_check_rate() {
+  local label=$1 expected_kbps=$2 current_enabled=$3 current_kbps=$4
+  local expected_mbps current_mbps
+  expected_mbps=$(rate_mbps "$expected_kbps")
+  current_mbps=$(rate_mbps "${current_kbps:-0}")
+
+  if ! is_true "$current_enabled"; then
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
+      "$label" "$expected_mbps"
+    return
+  fi
+
+  if [[ "${current_kbps:-0}" == "$expected_kbps" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" "$label" "$current_mbps"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
+      "$label" "$expected_mbps"
+  fi
+}
+
+print_general_check_value() {
+  local label=$1 expected=$2 current=$3 suffix=${4:-}
+
+  if [[ "$current" == "$expected" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s%s${RESET}\n" "$label" "$current" "$suffix"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s%s${RESET}\n" \
+      "$label" "$expected" "$suffix"
+  fi
+}
+
+print_general_check_protocol() {
+  local label=$1 allowed=$2 current=$3
+  local expected_state
+  expected_state=$(security_protocol_expected_state "$allowed")
+
+  if security_protocol_allowed "$allowed" "$current"; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$current"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
+      "$label" "$expected_state"
+  fi
+}
+
+print_general_check_bands() {
+  local label=$1 expected=$2 actual=$3
+  local expected_state actual_state
+  expected_state=$(wifi_bands_state "$expected")
+  actual_state=$(wifi_bands_state "$actual")
+
+  if [[ "$expected" == "$actual" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$actual_state"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
+      "$label" "$expected_state"
+  fi
+}
+
+print_general_check_rekey() {
+  local label=$1 expected=$2 current=$3
+  local expected_state current_state expected_norm current_norm
+  expected_norm=$(normalize_rekey "$expected")
+  current_norm=$(normalize_rekey "$current")
+  expected_state=$(rekey_state "$expected_norm")
+  current_state=$(rekey_state "$current_norm")
+
+  if [[ "$current_norm" == "$expected_norm" ]]; then
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$current_state"
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
+      "$label" "$expected_state"
+  fi
+}
+
+print_general_check_missing() {
+  local label=$1 expected=$2
+  flag_change
+  printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$expected"
+}
+
+print_general_checks() {
+  local site=$1
+  local matched=false
+  local wlan_name profile_name actual_row profile_row
+  local enabled bss_transition fast_roaming
+  local minrate_mode dtim_mode
+  local minrate24_en minrate24 minrate5_en minrate5
+  local bc_filter mcast_enhance proxy_arp
+  local wlan_band wlan_bands mlo security wpa_mode wpa3_support wpa3_transition pmf
+  local hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd
+  local dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon
+  local profile expected_wifi_bands expected_mlo expected_fast_roaming expected_minrate_mode expected_minrate24 expected_minrate5
+  local expected_bc_filter expected_mcast_enhance expected_proxy_arp
+  local expected_security_protocols expected_pmf expected_hide_wifi_name
+  local expected_client_device_isolation expected_sae_anti_clogging expected_sae_sync_time
+  local expected_bss_transition expected_uapsd expected_dtim_mode expected_dtim24 expected_dtim5 expected_dtim6
+  local expected_group_rekey expected_ap_name_in_beacon
+  local actual_wifi_bands actual_security_protocol actual_pmf
+
+  if [[ ! -s "$(site_wlans_tsv_path "$site")" ]]; then
+    printf "  ${YELLOW}  ! Could not read WLAN settings from UniFi API for site %s${RESET}\n" "$site"
+    echo
+    return
+  fi
+
+  while IFS=$'\t' read -r current_site wlan_name profile_name; do
+    [[ "$current_site" != "$site" ]] && continue
+    matched=true
+    print_wlan_header "$wlan_name" "$profile_name"
+
+    actual_row=$(get_site_wlan_row "$site" "$wlan_name")
+    if [[ -z "$actual_row" ]]; then
+      printf 'ERROR: WLAN "%s" from config.yaml was not found in site "%s". Check the wlans mapping, then run the script again.\n' "$wlan_name" "$site" >&2
+      exit 1
+    fi
+
+    IFS="$WLAN_FIELD_SEP" read -r \
+      _name enabled bss_transition fast_roaming \
+      minrate_mode \
+      minrate24_en minrate24 minrate5_en minrate5 \
+      bc_filter mcast_enhance proxy_arp \
+      wlan_band wlan_bands mlo security wpa_mode wpa3_support wpa3_transition pmf \
+      hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd \
+      dtim_mode \
+      dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon <<< "$actual_row"
+
+    if ! is_true "$enabled"; then
+      print_general_check_missing "WLAN Enabled" "Enabled"
+      echo
+      continue
+    fi
+
+    profile_row=$(get_profile_row "$profile_name")
+    if [[ -z "$profile_row" ]]; then
+      print_general_check_missing "Profile" "$profile_name"
+      echo
+      continue
+    fi
+
+    IFS=$'\t' read -r \
+      profile expected_wifi_bands expected_mlo expected_fast_roaming expected_minrate_mode expected_minrate24 expected_minrate5 \
+      expected_bc_filter expected_mcast_enhance expected_proxy_arp \
+      expected_security_protocols expected_pmf expected_hide_wifi_name \
+      expected_client_device_isolation expected_sae_anti_clogging expected_sae_sync_time \
+      expected_bss_transition expected_uapsd expected_dtim_mode expected_dtim24 expected_dtim5 expected_dtim6 \
+      expected_group_rekey expected_ap_name_in_beacon <<< "$profile_row"
+
+    actual_wifi_bands=$(normalize_wifi_bands "$wlan_band" "$wlan_bands")
+    actual_security_protocol=$(security_protocol_state "$security" "$wpa_mode" "$wpa3_support" "$wpa3_transition")
+    actual_pmf=$(pmf_state "$pmf")
+
+    print_general_group_header "  Radio Setup:"
+    print_general_check_bands "WiFi Band" "$expected_wifi_bands" "$actual_wifi_bands"
+
+    echo
+    print_general_group_header "  Roaming Assistance:"
+    print_general_check_bool "Fast Roaming" "$expected_fast_roaming" "$fast_roaming"
+
+    echo
+    print_general_group_header "  Hi-Capacity Tuning:"
+    print_general_check_minrate_mode "$minrate_mode" "$expected_minrate_mode"
+    if [[ "$(normalize_minrate_mode "$expected_minrate_mode")" == "manual" ]]; then
+      if wifi_band_includes "$expected_wifi_bands" "2g"; then
+        print_general_check_rate "Minimum Data Rate 2.4 GHz" "$expected_minrate24" "$minrate24_en" "$minrate24"
+      fi
+      if wifi_band_includes "$expected_wifi_bands" "5g"; then
+        print_general_check_rate "Minimum Data Rate 5 GHz" "$expected_minrate5" "$minrate5_en" "$minrate5"
+      fi
+    fi
+    print_general_check_bool "Multicast and Broadcast Blocker" "$expected_bc_filter" "$bc_filter"
+    print_general_check_bool "Multicast to Unicast" "$expected_mcast_enhance" "$mcast_enhance"
+    print_general_check_bool "Proxy ARP" "$expected_proxy_arp" "$proxy_arp"
+
+    echo
+    print_general_group_header "  Security:"
+    print_general_check_protocol "Security Protocol" "$expected_security_protocols" "$actual_security_protocol"
+    print_general_check_value "PMF" "$expected_pmf" "$actual_pmf"
+    print_general_check_bool "Hide WiFi Name" "$expected_hide_wifi_name" "$hide_ssid"
+    print_general_check_bool "Client Device Isolation" "$expected_client_device_isolation" "$l2_isolation"
+    if security_protocol_uses_sae "$actual_security_protocol"; then
+      print_general_check_value "SAE Anti-clogging" "$expected_sae_anti_clogging" "${sae_anti_clogging:-n/a}"
+      print_general_check_value "SAE Sync Time" "$expected_sae_sync_time" "${sae_sync:-n/a}"
+    fi
+
+    echo
+    print_general_group_header "  Behaviour Controls:"
+    print_general_check_bool "MLO" "$expected_mlo" "$mlo"
+    print_general_check_bool "BSS Transition" "$expected_bss_transition" "$bss_transition"
+    print_general_check_bool "UAPSD" "$expected_uapsd" "$uapsd"
+    print_general_check_dtim_mode "$dtim_mode" "$expected_dtim_mode"
+    if [[ "$(normalize_dtim_mode "$expected_dtim_mode")" == "custom" ]]; then
+      if wifi_band_includes "$expected_wifi_bands" "2g"; then
+        print_general_check_value "DTIM Period 2.4 GHz" "$expected_dtim24" "${dtim24:-n/a}"
+      fi
+      if wifi_band_includes "$expected_wifi_bands" "5g"; then
+        print_general_check_value "DTIM Period 5 GHz" "$expected_dtim5" "${dtim5:-n/a}"
+      fi
+      if wifi_band_includes "$expected_wifi_bands" "6g"; then
+        print_general_check_value "DTIM Period 6 GHz" "$expected_dtim6" "${dtim6:-n/a}"
+      fi
+    fi
+    print_general_check_rekey "Group Rekey Interval" "$expected_group_rekey" "${group_rekey:-0}"
+    print_general_check_bool "Show Access Point Name in Beacon" "$expected_ap_name_in_beacon" "$ap_name_in_beacon"
+    echo
+  done < "$WLANS_FILE"
+
+  if [[ "$matched" != "true" ]]; then
+    printf "  ${YELLOW}  ! No WLAN profile mappings configured for site %s${RESET}\n" "$site"
+    echo
+  fi
+}
+
+# print_rec_tx  recommended txmode current
+print_rec_tx() {
+  local recommended=$1 txmode=$2 current=$3
+  local label="Transmit Power"
+  local delta=$(( recommended - current ))
+  local direction="increase"
+  (( delta < 0 )) && direction="reduce"
+
+  if (( recommended == current )); then
+    if [[ "$txmode" != "custom" ]]; then
+      flag_change
+      printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Custom, %d dBm${RESET}\n" "$label" "$current"
+      printf "  ${RED}    ! TX Power Mode is \"%s\" - set to Custom first${RESET}\n" "$txmode"
+    else
+      printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Custom, %d dBm${RESET}\n" "$label" "$current"
+    fi
+  else
+    flag_change
+    printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Custom, %d dBm (%s by %d dBm)${RESET}\n" \
+      "$label" "$recommended" "$direction" "$(( delta < 0 ? -delta : delta ))"
+    if [[ "$txmode" != "custom" ]]; then
+      printf "  ${RED}    ! TX Power Mode is \"%s\" - set to Custom first${RESET}\n" "$txmode"
+    fi
+  fi
+}
+
+# print_rec_min_rssi  recommended enabled current
+print_rec_min_rssi() {
+  local recommended=$1 enabled=$2 current=$3
+  local label="Minimum RSSI"
+
+  if is_true "$enabled"; then
+    flag_change
+    printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Disabled${RESET}" "$label"
+    if [[ "$current" == "$recommended" ]]; then
+      printf " ${GREEN}(if enabled %d dBm)${RESET}\n" "$recommended"
+    else
+      printf " ${RED}(if enabled %d dBm)${RESET}\n" "$recommended"
+    fi
+  else
+    printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Disabled${RESET}\n" "$label"
+  fi
+}
+
+print_rec_interference_blocker() {
+  local enabled=$1
+  local label="Interference Blocker"
+
+  if is_true "$enabled"; then
+    flag_change
+    printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Disabled${RESET}\n" "$label"
+  else
+    printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Disabled${RESET}\n" "$label"
+  fi
+}
+
+# print_rec_roaming  recommended roam_enabled current_roam_rssi
+print_rec_roaming() {
+  local recommended=$1 roam_enabled=$2 current_roam_rssi=$3
+  local label="Roaming Assistant"
+
+  if ! is_true "$roam_enabled"; then
+    flag_change
+    printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" \
+      "$label" "$recommended"
+    return
+  fi
+
+  if (( recommended != current_roam_rssi )); then
+    flag_change
+    printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" \
+      "$label" "$recommended"
+  else
+    printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" "$label" "$current_roam_rssi"
+  fi
+}
+
+print_footer() {
+  local has_changes=$1
+  if [[ "$has_changes" == "true" ]]; then
+    echo
+    printf "  %sAfter applying changes, please run this script again.\n" "$YELLOW"
+    printf "  Note: For DFS channels, wait until all access points have\n"
+    printf "  activated the channel before re-running.%s\n" "$RESET"
+  fi
+  echo
+}
+
+ap_scan_prefix() {
+  local site=$1 ap=$2
+  printf "%s/%s__%s" "$tmpdir" "$(sanitize_token "$site")" "$(sanitize_token "$ap")"
+}
+
+# ============================================================================
+# Main: Scanning
+# ============================================================================
+
+MODE="run"
+SITE_SELECTOR=""
+
+case "${1:-}" in
+  "")
+    ;;
+  --sites)
+    [[ $# -eq 1 ]] || { print_usage >&2; exit 1; }
+    MODE="sites"
+    ;;
+  --site)
+    [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
+    MODE="site"
+    SITE_SELECTOR=$2
+    ;;
+  --config)
+    [[ $# -eq 2 ]] || { print_usage >&2; exit 1; }
+    MODE="config"
+    SITE_SELECTOR=$2
+    ;;
+  -h|--help)
+    print_usage
+    exit 0
+    ;;
+  *)
+    printf 'ERROR: Unknown argument: %s\n' "$1" >&2
+    print_usage >&2
+    exit 1
+    ;;
+esac
+
+require_config_file
+load_controller_config
+
+case "$MODE" in
+  sites)
+    fetch_controller_sites
+    show_sites
+    exit 0
+    ;;
+  site)
+    fetch_controller_sites
+    show_site_env "$SITE_SELECTOR"
+    exit 0
+    ;;
+  config)
+    fetch_controller_sites
+    print_config_skeleton "$SITE_SELECTOR"
+    exit 0
+    ;;
+esac
+
+require_profiles_file
+load_yaml_config
+check_dependencies
+
+print_header
+echo "  Detecting environment..."
+echo
+
+build_site_inventory
+SITE_COUNT=$(wc -l < "$SITES_FILE" | tr -d '[:space:]')
+
+echo "  Scanning access points..."
+
+current_scan_site=""
+SITE_SSH_USER=""
+SITE_SSH_PASSWORD=""
+while IFS=$'\t' read -r site ap mac ip; do
+  [[ -z "$site" ]] && continue
+  scan_prefix=$(ap_scan_prefix "$site" "$ap")
+  scan_err_file="${scan_prefix}.err"
+
+  if [[ "$site" != "$current_scan_site" ]]; then
+    load_site_ssh_credentials "$site"
+    current_scan_site="$site"
+  fi
+
+  echo "    Scanning ${site}/${ap}..."
+
+  if ! ssh_scan_ap "${SITE_SSH_USER}@${ip}" "$SITE_SSH_PASSWORD" > "${scan_prefix}.raw" 2> "$scan_err_file"; then
+    : > "${scan_prefix}.raw"
+    if [[ -s "$scan_err_file" ]]; then
+      printf "    SSH failed: %s\n" "$(tr '\n' ' ' < "$scan_err_file" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+    else
+      echo "    SSH failed: no details returned"
+    fi
+    continue
+  fi
+
+  awk '/^===5GHZ===/ { exit } { print }' "${scan_prefix}.raw" > "${scan_prefix}.2g"
+  awk 'found { print } /^===5GHZ===/ { found=1 }' "${scan_prefix}.raw" > "${scan_prefix}.5g"
+done < "$APS_FILE"
+
+echo
+echo "  Analyzing recommendations..."
+echo
+
+# ============================================================================
+# Main: Analysis & Output
+# ============================================================================
+has_changes=false
+
+while IFS=$'\t' read -r site n env_label _ssh_user _ssh_password; do
+  [[ -z "$site" ]] && continue
+
+  # Compute TX corridor for this site from path loss model
+  TX_LO=$(awk "BEGIN { printf \"%.0f\", $ROAM_TARGET - 10*$n*log(100/$OVERLAP_DIST)/log(10) }")
+  TX_HI=$(( TX_LO + CORRIDOR_WIDTH ))
+
+  if (( SITE_COUNT > 1 )); then
+    print_site_header "$site"
+  fi
+
+  print_environment_header
+  printf "  %-26s %s\n"              "Environment:"            "$env_label"
+  printf "  %-26s %d dBm to %d dBm\n" "Target RSSI @ Neighbor:" "$TX_LO" "$TX_HI"
+  printf "  %-26s %d dBm\n"           "Roaming Assistant:"      "$ROAM_TARGET"
+  printf "  %-26s %d dBm\n"            "Minimum RSSI:"          "$TX_LO"
+  echo
+
+  print_general_checks "$site"
+
+  while IFS=$'\t' read -r current_site ap mac ip; do
+    [[ "$current_site" != "$site" ]] && continue
+    mac2g=$(mac_with_offset "$mac" 1)
+    mac5g=$(mac_with_offset "$mac" 2)
+    peers="$(get_peers "$site" "$ap")"
+    scan_prefix=$(ap_scan_prefix "$site" "$ap")
+
+    # Get current radio info from cached UniFi device data
+    # Format: ch24|ht24|tx24|min_tx24|max_tx24|txmode24|min_rssi24|min_rssi_en24|ch5|ht5|tx5|min_tx5|max_tx5|txmode5|min_rssi5|min_rssi_en5|roam_enabled|roam_rssi|ib24|ib5
+    radio_info=$(get_radio_info "$site" "$ap")
+    IFS='|' read -r \
+      ch24 cht24 tx24 min_tx24 max_tx24 txmode24 min_rssi24 min_rssi_en24 \
+      ch5 cht5 tx5 min_tx5 max_tx5 txmode5 min_rssi5 min_rssi_en5 \
+      roam_enabled roam_rssi ib24 ib5 <<< "$radio_info"
+
+    # Warn if critical radio data is missing from the API
+    if [[ -z "$tx24" || -z "$tx5" ]]; then
+      printf '  %s  ! Warning: incomplete radio data from API — recommendations may use defaults%s\n' "$RED" "$RESET"
+    fi
+
+    # Conservative defaults used only when the API does not expose a field.
+    # They keep the report readable, but the warning above should be treated
+    # as a sign that the recommendation may be less trustworthy.
+    ch24=${ch24:-6};      cht24=${cht24:-20}
+    tx24=${tx24:-11};     min_tx24=${min_tx24:-$TX_MIN}; max_tx24=${max_tx24:-$TX_MAX}; txmode24=${txmode24:-custom}
+    min_rssi24=${min_rssi24:--75};  min_rssi_en24=${min_rssi_en24:-false}
+    ch5=${ch5:-100};      cht5=${cht5:-80}
+    tx5=${tx5:-20};       min_tx5=${min_tx5:-$TX_MIN}; max_tx5=${max_tx5:-$TX_MAX}; txmode5=${txmode5:-custom}
+    min_rssi5=${min_rssi5:--79};    min_rssi_en5=${min_rssi_en5:-false}
+    roam_enabled=${roam_enabled:-false}; roam_rssi=${roam_rssi:-}
+    ib24=${ib24:-false}; ib5=${ib5:-false}
+
+    print_ap_header "$ap" "$mac"
+
+    # Pre-compute peer scan prefixes once (reused for both band loops)
+    _peer_prefixes=()
+    for peer in $peers; do
+      _peer_prefixes+=("$(ap_scan_prefix "$site" "$peer")")
+    done
+
+    # ══════════ 2.4 GHz ══════════
+    print_channel_info "2.4" "$cht24" "$ch24" "$tx24"
+
+    # Collect 2.4 GHz neighbor data (rssi_to = signal from this AP received at neighbor)
+    _nbr_peer=(); _nbr_rssi=()
+    _sum_rssi24=0; _count_nbr24=0
+    _i=0
+    for peer in $peers; do
+      peer_prefix="${_peer_prefixes[$_i]}"
+      _i=$(( _i + 1 ))
+      rssi_to=$(get_rssi "$mac2g" "${peer_prefix}.2g")
+      if [[ -n "$rssi_to" ]]; then
+        _nbr_peer+=("$peer"); _nbr_rssi+=("$rssi_to")
+        _sum_rssi24=$(( _sum_rssi24 + rssi_to ))
+        _count_nbr24=$(( _count_nbr24 + 1 ))
+      fi
+    done
+
+    # Compute recommendations
+    tx24_uncapped=$tx24
+    if [[ $_count_nbr24 -gt 0 ]]; then
+      avg_24=$(( _sum_rssi24 / _count_nbr24 ))
+      calculate_tx_shift "$avg_24"; shift=$_result
+      quantize "$shift"; quantized_shift=$_result
+      tx24_uncapped=$(( tx24 + quantized_shift ))
+      if (( quantized_shift == 0 )); then
+        rec_tx24=$tx24
+      else
+        cap_tx_power "$tx24_uncapped" "$min_tx24" "$max_tx24"; rec_tx24=$_result
+      fi
+      # Hysteresis: suppress ±1 dBm changes unless the result hits a hardware limit.
+      # Prevents constant small oscillations between runs.
+      _delta24=$(( rec_tx24 - tx24 ))
+      (( _delta24 < 0 )) && _delta24=$(( -_delta24 ))
+      if (( _delta24 <= 1 && rec_tx24 != max_tx24 && rec_tx24 != min_tx24 )); then
+        rec_tx24=$tx24
+      fi
+      calculate_min_rssi_recommendation; rec_rssi24=$_result
+    fi
+
+    # Warn only when TX is already at the hardware limit and neighbors are still
+    # outside the corridor — TX power alone cannot fix the problem at that point.
+    _nbr_warn=()
+    if [[ $_count_nbr24 -gt 0 ]]; then
+      _shift_applied=$(( rec_tx24 - tx24 ))
+      if (( tx24_uncapped > max_tx24 )); then
+        for _j in "${!_nbr_peer[@]}"; do
+          _proj=$(( _nbr_rssi[_j] + _shift_applied ))
+          (( _proj < TX_LO )) && _nbr_warn[_j]="lo"
+        done
+      elif (( tx24_uncapped < min_tx24 )); then
+        for _j in "${!_nbr_peer[@]}"; do
+          _proj=$(( _nbr_rssi[_j] + _shift_applied ))
+          (( _proj > TX_HI )) && _nbr_warn[_j]="hi"
+        done
+      fi
+    fi
+
+    # Print neighbor table; star marks neighbors still outside the corridor after rec_tx
+    print_neighbor_header
+    for _j in "${!_nbr_peer[@]}"; do
+      _starred=""
+      [[ "${_nbr_warn[$_j]:-}" != "" ]] && _starred="*"
+      print_neighbor_row "${_nbr_peer[$_j]}" "${_nbr_rssi[$_j]}" "$_starred"
+    done
+
+    # Per-neighbor warnings below the table
+    _warn_lo=""; _warn_hi=""
+    for _j in "${!_nbr_peer[@]}"; do
+      case "${_nbr_warn[$_j]:-}" in
+        lo) _warn_lo+="${_nbr_peer[$_j]} " ;;
+        hi) _warn_hi+="${_nbr_peer[$_j]} " ;;
+      esac
+    done
+    if [[ -n "$_warn_lo" ]]; then
+      printf "\n  ${YELLOW}* Coverage gap – signal too weak at: %s${RESET}\n" "${_warn_lo% }"
+      printf '  %s  Consider repositioning this AP or adding a neighbor AP.%s\n' "$YELLOW" "$RESET"
+    fi
+    if [[ -n "$_warn_hi" ]]; then
+      printf "\n  ${YELLOW}* Excess overlap – signal too strong at: %s${RESET}\n" "${_warn_hi% }"
+      printf '  %s  Consider repositioning or removing this AP.%s\n' "$YELLOW" "$RESET"
+    fi
+
+    if [[ $_count_nbr24 -gt 0 ]]; then
+      print_recommendations_header
+      print_rec_tx      "$rec_tx24"   "$txmode24"     "$tx24"
+      print_rec_min_rssi "$rec_rssi24" "$min_rssi_en24" "$min_rssi24"
+      if is_true "$min_rssi_en24"; then
+        print_rec_interference_blocker "$ib24"
+      fi
+    else
+      echo
+      echo "  No neighbor data for 2.4 GHz"
+    fi
+
+    echo
+
+    # ══════════ 5 GHz ══════════
+    print_channel_info "5" "$cht5" "$ch5" "$tx5"
+
+    # Collect 5 GHz neighbor data (rssi_to = signal from this AP received at neighbor)
+    _nbr_peer=(); _nbr_rssi=()
+    _sum_rssi5=0; _count_nbr5=0
+    _i=0
+    for peer in $peers; do
+      peer_prefix="${_peer_prefixes[$_i]}"
+      _i=$(( _i + 1 ))
+      rssi_to=$(get_rssi "$mac5g" "${peer_prefix}.5g")
+      if [[ -n "$rssi_to" ]]; then
+        _nbr_peer+=("$peer"); _nbr_rssi+=("$rssi_to")
+        _sum_rssi5=$(( _sum_rssi5 + rssi_to ))
+        _count_nbr5=$(( _count_nbr5 + 1 ))
+      fi
+    done
+
+    # Compute recommendations
+    tx5_uncapped=$tx5
+    if [[ $_count_nbr5 -gt 0 ]]; then
+      avg_5=$(( _sum_rssi5 / _count_nbr5 ))
+      calculate_tx_shift "$avg_5"; shift=$_result
+      quantize "$shift"; quantized_shift=$_result
+      tx5_uncapped=$(( tx5 + quantized_shift ))
+      if (( quantized_shift == 0 )); then
+        rec_tx5=$tx5
+      else
+        cap_tx_power "$tx5_uncapped" "$min_tx5" "$max_tx5"; rec_tx5=$_result
+      fi
+      # Hysteresis: suppress ±1 dBm changes unless the result hits a hardware limit.
+      # Prevents constant small oscillations between runs.
+      _delta5=$(( rec_tx5 - tx5 ))
+      (( _delta5 < 0 )) && _delta5=$(( -_delta5 ))
+      if (( _delta5 <= 1 && rec_tx5 != max_tx5 && rec_tx5 != min_tx5 )); then
+        rec_tx5=$tx5
+      fi
+      calculate_min_rssi_recommendation; rec_rssi5=$_result
+      roam_recommended=$ROAM_TARGET
+    fi
+
+    # Warn only when TX is already at the hardware limit and neighbors are still
+    # outside the corridor — TX power alone cannot fix the problem at that point.
+    _nbr_warn=()
+    if [[ $_count_nbr5 -gt 0 ]]; then
+      _shift_applied=$(( rec_tx5 - tx5 ))
+      if (( tx5_uncapped > max_tx5 )); then
+        for _j in "${!_nbr_peer[@]}"; do
+          _proj=$(( _nbr_rssi[_j] + _shift_applied ))
+          (( _proj < TX_LO )) && _nbr_warn[_j]="lo"
+        done
+      elif (( tx5_uncapped < min_tx5 )); then
+        for _j in "${!_nbr_peer[@]}"; do
+          _proj=$(( _nbr_rssi[_j] + _shift_applied ))
+          (( _proj > TX_HI )) && _nbr_warn[_j]="hi"
+        done
+      fi
+    fi
+
+    # Print neighbor table; star marks neighbors still outside the corridor after rec_tx
+    print_neighbor_header
+    for _j in "${!_nbr_peer[@]}"; do
+      _starred=""
+      [[ "${_nbr_warn[$_j]:-}" != "" ]] && _starred="*"
+      print_neighbor_row "${_nbr_peer[$_j]}" "${_nbr_rssi[$_j]}" "$_starred"
+    done
+
+    # Per-neighbor warnings below the table
+    _warn_lo=""; _warn_hi=""
+    for _j in "${!_nbr_peer[@]}"; do
+      case "${_nbr_warn[$_j]:-}" in
+        lo) _warn_lo+="${_nbr_peer[$_j]} " ;;
+        hi) _warn_hi+="${_nbr_peer[$_j]} " ;;
+      esac
+    done
+    if [[ -n "$_warn_lo" ]]; then
+      printf "\n  ${YELLOW}* Coverage gap – signal too weak at: %s${RESET}\n" "${_warn_lo% }"
+      printf '  %s  Consider repositioning this AP or adding a neighbor AP.%s\n' "$YELLOW" "$RESET"
+    fi
+    if [[ -n "$_warn_hi" ]]; then
+      printf "\n  ${YELLOW}* Excess overlap – signal too strong at: %s${RESET}\n" "${_warn_hi% }"
+      printf '  %s  Consider repositioning or removing this AP.%s\n' "$YELLOW" "$RESET"
+    fi
+
+    if [[ $_count_nbr5 -gt 0 ]]; then
+      print_recommendations_header
+      print_rec_tx      "$rec_tx5"   "$txmode5"     "$tx5"
+      print_rec_roaming "$roam_recommended" "$roam_enabled" "$roam_rssi"
+      print_rec_min_rssi "$rec_rssi5" "$min_rssi_en5" "$min_rssi5"
+      if is_true "$min_rssi_en5"; then
+        print_rec_interference_blocker "$ib5"
+      fi
+    else
+      echo
+      echo "  No neighbor data for 5 GHz"
+    fi
+
+    echo
+  done < "$APS_FILE"
+done < "$SITES_FILE"
+
+print_footer "$has_changes"
+
+exit 0
