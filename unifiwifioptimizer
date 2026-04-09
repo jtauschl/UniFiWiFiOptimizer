@@ -61,7 +61,7 @@ CORRIDOR_WIDTH=6  # corridor width in dB
 TX_MIN=6
 TX_MAX=23
 HYSTERESIS_UP_DB=1
-HYSTERESIS_DOWN_DB=2
+HYSTERESIS_DOWN_DB=3
 SCAN_ATTEMPTS=2
 
 # Output colors and label widths used by the terminal report
@@ -312,8 +312,17 @@ sites.each do |site_name, site_cfg|
     env_label = "Custom (n=#{rf_env})"
   end
 
+  raw_scan_passes = site_cfg["scan_passes"]
+  if raw_scan_passes.nil?
+    scan_passes = 1
+  elsif raw_scan_passes.to_s =~ /\A\d+\z/ && raw_scan_passes.to_s.to_i >= 1
+    scan_passes = raw_scan_passes.to_s.to_i
+  else
+    abort("ERROR: site #{site_name}: scan_passes must be a positive integer (got: #{raw_scan_passes})")
+  end
+
   File.open(File.join(out_dir, "sites.tsv"), "a") do |f|
-    f.puts([site_name, n, env_label, ssh_user, ssh_password].join("\t"))
+    f.puts([site_name, n, env_label, ssh_user, ssh_password, scan_passes].join("\t"))
   end
 
   wlans.each do |wlan_name, profile_name|
@@ -845,6 +854,10 @@ print("")
 print("    # Open, Residential, Office, Obstructed, or a custom path-loss exponent")
 print("    environment: Residential")
 print("")
+print("    # Number of round-robin scan passes (default: 1).")
+print("    # Use 1 for initial setup, 3 or more for stable fine-tuning.")
+print("    scan_passes: 1")
+print("")
 print("    # Standard, IoT, Hotspot, Throughput, or Latency")
 print("    wlans:")
 if wlans:
@@ -1294,6 +1307,127 @@ for line in text.splitlines():
         current_mac = ""
 
 write_rows(best)
+PY
+}
+
+build_rssi_cache_file_with_channels() {
+  local source_file=$1 rssi_cache_file=$2 chan_cache_file=$3
+  python3 - "$source_file" "$rssi_cache_file" "$chan_cache_file" <<'PY'
+import re
+import sys
+
+source_file, rssi_cache_file, chan_cache_file = sys.argv[1:]
+with open(source_file, "r", encoding="utf-8", errors="ignore") as handle:
+    text = handle.read().split("===META===", 1)[0]
+
+mac_re = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+
+best = {}
+channels = {}
+current_mac = ""
+current_freq = ""
+for line in text.splitlines():
+    fields = line.split()
+    if len(fields) >= 2 and fields[0] == "BSS":
+        current_mac = fields[1].split("(", 1)[0].lower()
+        current_freq = ""
+        continue
+    if len(fields) >= 2 and fields[0] == "freq:" and current_mac:
+        current_freq = fields[1]
+        continue
+    if len(fields) >= 2 and fields[0] == "signal:" and current_mac:
+        try:
+            rssi = int(float(fields[1]))
+        except ValueError:
+            current_mac = ""
+            current_freq = ""
+            continue
+        if mac_re.match(current_mac) and -100 < rssi < 0:
+            if current_mac not in best or rssi > best[current_mac]:
+                best[current_mac] = rssi
+                channels[current_mac] = current_freq
+        current_mac = ""
+        current_freq = ""
+
+with open(rssi_cache_file, "w", encoding="utf-8") as handle:
+    for mac, rssi in sorted(best.items()):
+        handle.write(f"{mac}\t{rssi}\n")
+
+with open(chan_cache_file, "w", encoding="utf-8") as handle:
+    for mac, freq in sorted(channels.items()):
+        handle.write(f"{mac}\t{freq}\n")
+PY
+}
+
+aggregate_rssi_passes() {
+  local scan_prefix=$1 band_key=$2 passes=$3
+  python3 - "$scan_prefix" "$band_key" "$passes" <<'PY'
+import sys
+from collections import defaultdict, Counter
+
+scan_prefix, band_key, passes_str = sys.argv[1:]
+passes = int(passes_str)
+
+# Collect per-mac: list of (rssi, freq) from each pass
+data = defaultdict(list)
+
+for p in range(1, passes + 1):
+    rssi_file = f"{scan_prefix}.{band_key}.{p}.rssi"
+    chan_file  = f"{scan_prefix}.{band_key}.{p}.chan"
+
+    freqs = {}
+    try:
+        with open(chan_file, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 2:
+                    freqs[parts[0]] = parts[1]
+    except FileNotFoundError:
+        pass
+
+    try:
+        with open(rssi_file, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 2:
+                    mac = parts[0]
+                    try:
+                        rssi = int(parts[1])
+                    except ValueError:
+                        continue
+                    data[mac].append((rssi, freqs.get(mac, "")))
+    except FileNotFoundError:
+        pass
+
+result = {}
+for mac, measurements in data.items():
+    # Determine consensus frequency (most common non-empty value)
+    freqs_seen = [f for _, f in measurements if f]
+    if freqs_seen:
+        consensus_freq, consensus_count = Counter(freqs_seen).most_common(1)[0]
+        # Only use consensus-frequency group if it has a strict majority (> 50%).
+        # At a tie, measurements are from different channels and incomparable — skip.
+        if consensus_count * 2 > len(measurements):
+            vals = [r for r, f in measurements if f == consensus_freq]
+        else:
+            vals = []
+    else:
+        vals = [r for r, _ in measurements]
+
+    n = len(vals)
+    if n == 0:
+        continue
+    elif n >= 3:
+        vals_sorted = sorted(vals)
+        trimmed = vals_sorted[1:-1]
+        result[mac] = round(sum(trimmed) / len(trimmed))
+    else:
+        result[mac] = max(vals)
+
+cache_file = f"{scan_prefix}.{band_key}.rssi"
+with open(cache_file, "w", encoding="utf-8") as fh:
+    for mac, rssi in sorted(result.items()):
+        fh.write(f"{mac}\t{rssi}\n")
 PY
 }
 
@@ -2265,12 +2399,16 @@ print_group_issues() {
     fi
 
     printf '  %s%s%s\n' "$CYAN" "$group_label" "$RESET"
-    for member in "${issues[@]}"; do
-      printf '  %s! %s%s\n' "$YELLOW" "$member" "$RESET"
-    done
-    for member in "${infos[@]}"; do
-      printf '  %s· %s%s\n' "$GREEN" "$member" "$RESET"
-    done
+    if (( ${#issues[@]} > 0 )); then
+      for member in "${issues[@]}"; do
+        printf '  %s! %s%s\n' "$YELLOW" "$member" "$RESET"
+      done
+    fi
+    if (( ${#infos[@]} > 0 )); then
+      for member in "${infos[@]}"; do
+        printf '  %s· %s%s\n' "$GREEN" "$member" "$RESET"
+      done
+    fi
     echo
   done < <(list_site_groups "$site")
 }
@@ -2350,20 +2488,20 @@ analyze_band() {
   if [[ $_count_nbr -gt 0 ]]; then
     calculate_tx_shift "$_sum_rssi" "$_count_nbr"; shift=$_result
     tx_uncapped=$(( tx + shift ))
-    if (( shift == 0 )); then
+    if (( shift == 0 || ( _sum_rssi >= TX_LO * _count_nbr && _sum_rssi <= TX_HI * _count_nbr ) )); then
       rec_tx=$tx
     else
       cap_tx_power "$tx_uncapped" "$min_tx" "$max_tx"; rec_tx=$_result
-    fi
 
-    _delta=$(( rec_tx - tx ))
-    if (( _delta > 0 )); then
-      if (( _delta < HYSTERESIS_UP_DB && rec_tx != max_tx )); then
-        rec_tx=$tx
-      fi
-    elif (( _delta < 0 )); then
-      if (( -_delta < HYSTERESIS_DOWN_DB && rec_tx != min_tx )); then
-        rec_tx=$tx
+      _delta=$(( rec_tx - tx ))
+      if (( _delta > 0 )); then
+        if (( _delta < HYSTERESIS_UP_DB && rec_tx != max_tx )); then
+          rec_tx=$tx
+        fi
+      elif (( _delta < 0 )); then
+        if (( -_delta < HYSTERESIS_DOWN_DB )); then
+          rec_tx=$tx
+        fi
       fi
     fi
 
@@ -2543,34 +2681,89 @@ SITE_COUNT=$(wc -l < "$SITES_FILE" | tr -d '[:space:]')
 
 echo "  Scanning access points..."
 
+MAX_SCAN_PASSES=$(awk -F '\t' '$6+0 > max { max=$6+0 } END { print (max<1?1:max) }' "$SITES_FILE")
+MAX_SCAN_PASSES=$(( MAX_SCAN_PASSES > 0 ? MAX_SCAN_PASSES : 1 ))
+
 current_scan_site=""
 current_site_ssh_user=""
 current_site_ssh_password=""
-while IFS=$'\t' read -r site ap mac ip _model; do
-  [[ -z "$site" ]] && continue
-  scan_prefix=$(ap_scan_prefix "$site" "$ap")
-  scan_err_file="${scan_prefix}.err"
+current_site_scan_passes=1
 
-  if [[ "$site" != "$current_scan_site" ]]; then
-    IFS=$'\t' read -r current_site_ssh_user current_site_ssh_password <<< "$(site_ssh_credentials "$site")"
-    current_scan_site="$site"
-  fi
+_scan_pass=1
+while (( _scan_pass <= MAX_SCAN_PASSES )); do
+  while IFS=$'\t' read -r site ap mac ip _model; do
+    [[ -z "$site" ]] && continue
+    scan_prefix=$(ap_scan_prefix "$site" "$ap")
 
-  echo "    Scanning ${site}/${ap}..."
-  if ! ssh_scan_ap "${current_site_ssh_user}@${ip}" "$current_site_ssh_password" > "${scan_prefix}.raw" 2> "$scan_err_file"; then
-    : > "${scan_prefix}.raw"
-    if [[ -s "$scan_err_file" ]]; then
-      printf "    SSH failed: %s\n" "$(tr '\n' ' ' < "$scan_err_file" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
-    else
-      echo "    SSH failed: no details returned"
+    if [[ "$site" != "$current_scan_site" ]]; then
+      IFS=$'\t' read -r current_site_ssh_user current_site_ssh_password <<< "$(site_ssh_credentials "$site")"
+      current_site_scan_passes=$(awk -F '\t' -v s="$site" '$1==s { print ($6==""||$6+0<1)?1:$6+0; exit }' "$SITES_FILE")
+      current_site_scan_passes=$(( current_site_scan_passes > 0 ? current_site_scan_passes : 1 ))
+      current_scan_site="$site"
     fi
-  fi
 
-  awk '/^===5GHZ===/ { exit } { print }' "${scan_prefix}.raw" > "${scan_prefix}.2g"
-  awk 'found { print } /^===5GHZ===/ { found=1 }' "${scan_prefix}.raw" > "${scan_prefix}.5g"
-  build_rssi_cache_file "${scan_prefix}.2g" "$(scan_rssi_cache_path "${scan_prefix}.2g")"
-  build_rssi_cache_file "${scan_prefix}.5g" "$(scan_rssi_cache_path "${scan_prefix}.5g")"
-done < "$APS_FILE"
+    (( _scan_pass > current_site_scan_passes )) && continue
+
+    if (( current_site_scan_passes > 1 )); then
+      echo "    Scanning ${site}/${ap} (pass ${_scan_pass}/${current_site_scan_passes})..."
+      raw_file="${scan_prefix}.raw.${_scan_pass}"
+    else
+      echo "    Scanning ${site}/${ap}..."
+      raw_file="${scan_prefix}.raw"
+    fi
+
+    scan_err_file="${scan_prefix}.err"
+    if ! ssh_scan_ap "${current_site_ssh_user}@${ip}" "$current_site_ssh_password" > "$raw_file" 2> "$scan_err_file"; then
+      : > "$raw_file"
+      if [[ -s "$scan_err_file" ]]; then
+        printf "    SSH failed: %s\n" "$(tr '\n' ' ' < "$scan_err_file" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+      else
+        echo "    SSH failed: no details returned"
+      fi
+    fi
+
+    if (( current_site_scan_passes > 1 )); then
+      awk '/^===5GHZ===/ { exit } { print }' "$raw_file" > "${scan_prefix}.2g.${_scan_pass}"
+      awk 'found { print } /^===5GHZ===/ { found=1 }' "$raw_file" > "${scan_prefix}.5g.${_scan_pass}"
+      build_rssi_cache_file_with_channels \
+        "${scan_prefix}.2g.${_scan_pass}" \
+        "${scan_prefix}.2g.${_scan_pass}.rssi" \
+        "${scan_prefix}.2g.${_scan_pass}.chan"
+      build_rssi_cache_file_with_channels \
+        "${scan_prefix}.5g.${_scan_pass}" \
+        "${scan_prefix}.5g.${_scan_pass}.rssi" \
+        "${scan_prefix}.5g.${_scan_pass}.chan"
+    else
+      awk '/^===5GHZ===/ { exit } { print }' "$raw_file" > "${scan_prefix}.2g"
+      awk 'found { print } /^===5GHZ===/ { found=1 }' "$raw_file" > "${scan_prefix}.5g"
+      build_rssi_cache_file "${scan_prefix}.2g" "$(scan_rssi_cache_path "${scan_prefix}.2g")"
+      build_rssi_cache_file "${scan_prefix}.5g" "$(scan_rssi_cache_path "${scan_prefix}.5g")"
+    fi
+  done < "$APS_FILE"
+  current_scan_site=""
+  _scan_pass=$(( _scan_pass + 1 ))
+done
+
+# Aggregate multi-pass results into final .rssi cache files
+if (( MAX_SCAN_PASSES > 1 )); then
+  while IFS=$'\t' read -r site ap mac ip _model; do
+    [[ -z "$site" ]] && continue
+    scan_prefix=$(ap_scan_prefix "$site" "$ap")
+    site_passes=$(awk -F '\t' -v s="$site" '$1==s { print ($6==""?1:$6+0); exit }' "$SITES_FILE")
+    # Find the last pass with a non-empty raw file to preserve ===NO_RADIO=== markers
+    # from a successful scan when a later pass fails over SSH.
+    last_good_pass=$site_passes
+    while (( last_good_pass > 1 )); do
+      [[ -s "${scan_prefix}.raw.${last_good_pass}" ]] && break
+      last_good_pass=$(( last_good_pass - 1 ))
+    done
+    cp "${scan_prefix}.raw.${last_good_pass}" "${scan_prefix}.raw" 2>/dev/null || : > "${scan_prefix}.raw"
+    cp "${scan_prefix}.2g.${last_good_pass}" "${scan_prefix}.2g" 2>/dev/null || : > "${scan_prefix}.2g"
+    cp "${scan_prefix}.5g.${last_good_pass}" "${scan_prefix}.5g" 2>/dev/null || : > "${scan_prefix}.5g"
+    aggregate_rssi_passes "$scan_prefix" "2g" "$site_passes"
+    aggregate_rssi_passes "$scan_prefix" "5g" "$site_passes"
+  done < "$APS_FILE"
+fi
 
 echo
 echo "  Analyzing recommendations..."

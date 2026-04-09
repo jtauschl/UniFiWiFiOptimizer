@@ -76,11 +76,11 @@ Example output:
 
   Access Points:
     Device Name   State   IP             MAC
-    AP1           ONLINE  172.20.1.101   f4:92:bf:aa:11:22
-    AP2           ONLINE  172.20.1.102   f4:92:bf:aa:33:44
-    AP3           ONLINE  172.20.1.103   f4:92:bf:aa:55:66
-    AP4           ONLINE  172.20.1.104   f4:92:bf:aa:77:88
-    AP5           ONLINE  172.20.1.105   f4:92:bf:aa:99:aa
+    AP1           ONLINE  192.168.1.101   f4:92:bf:aa:11:22
+    AP2           ONLINE  192.168.1.102   f4:92:bf:aa:33:44
+    AP3           ONLINE  192.168.1.103   f4:92:bf:aa:55:66
+    AP4           ONLINE  192.168.1.104   f4:92:bf:aa:77:88
+    AP5           ONLINE  192.168.1.105   f4:92:bf:aa:99:aa
 ```
 
 Generate a site-specific config skeleton:
@@ -103,6 +103,11 @@ sites:
 
     # Open, Residential, Office, Obstructed, or a custom path-loss exponent
     environment: Residential
+
+    # Number of round-robin scan passes (default: 1).
+    # Use 1 for initial setup to converge quickly.
+    # Use 3 or more for fine-tuning — enables noise filtering via trimmed mean.
+    scan_passes: 1
 
     # Standard, IoT, Hotspot, Throughput, or Latency
     wlans:
@@ -137,6 +142,8 @@ sites:
       password: YOUR_SSH_PASSWORD
 
     environment: Residential
+
+    scan_passes: 1
 
     wlans:
       General: Throughput
@@ -250,7 +257,7 @@ Recommendations:
   ✓ Minimum RSSI             Disabled
 ```
 
-Here the integer-averaged neighbor RSSI (−66 dBm) is above the corridor center (−70 dBm), so the script recommends reducing TX power by 4 dBm (shift −4, applied directly in 1 dBm steps).
+Here the average neighbor RSSI (−66 dBm) is above the corridor (−73 dBm to −67 dBm), so the script recommends reducing TX power by 4 dBm. If the average were already within the corridor, no change would be recommended regardless of the shift value.
 
 An outer AP hitting the hardware maximum:
 
@@ -281,3 +288,4 @@ The coverage warning appears because TX power is at the hardware maximum. `AP5` 
 - AP names must be unique within the UniFi site.
 - Keep neighbors symmetric when the physical overlap is symmetric.
 - For multi-floor environments, include only APs that are meaningful RF neighbors across floors.
+- Use `scan_passes: 1` during initial setup to apply changes quickly. Once the network is close to target, switch to `scan_passes: 3` for stable fine-tuning — three passes enables trimmed-mean noise filtering (the highest and lowest RSSI measurements are discarded before averaging). Any value ≥ 3 activates trimming; 3 is sufficient for most deployments.

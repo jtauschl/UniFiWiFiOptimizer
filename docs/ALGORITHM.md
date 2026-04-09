@@ -26,6 +26,20 @@ The script detects scan-capable interfaces automatically via `iface_can_scan()`:
 
 Each AP is scanned serially. Per band, the script can repeat `iw scan` multiple times (`SCAN_ATTEMPTS`, default `2`) and merges the results by keeping the strongest RSSI per BSSID.
 
+### Multi-Pass Scanning
+
+The `scan_passes` config option (per site, default `1`) controls how many full round-robin scan cycles are performed before analysis. Each pass scans every AP in sequence, so the measurements are spread over time rather than taken in a single burst.
+
+When `scan_passes >= 3`, a **trimmed mean** is applied per BSSID: the highest and lowest measurements across passes are discarded, and the remaining values are averaged. This removes single-measurement outliers (e.g. a spike caused by a temporary obstruction or a DFS channel change mid-run) without requiring an odd number of passes.
+
+Additionally, the channel (frequency) seen per BSSID is tracked across passes. If the channel changes between passes — as happens with DFS automatic channel selection — measurements from different channels are not averaged together. Instead, only the measurements from the most common channel are used, discarding the cross-channel readings as physically incomparable.
+
+For `scan_passes` of 1 or 2, the original behavior applies: the strongest RSSI per BSSID is kept.
+
+**Recommended usage:**
+- `scan_passes: 1` — initial setup, fast convergence
+- `scan_passes: 3` — fine-tuning, noise-filtered stable measurements
+
 ## 3. Neighbor Evaluation
 
 For each neighbor relationship, the script collects:
@@ -41,8 +55,14 @@ This is the only direction affected by the current AP's TX power. From all value
 ```text
 corridor_center = TX_LO + CORRIDOR_WIDTH / 2
 shift           = corridor_center - avg_neighbor_rssi
-recommended_tx  = clamp(current_tx + shift, radio_min_tx, radio_max_tx)
+
+if avg_neighbor_rssi is already within [TX_LO, TX_HI]:
+    recommended_tx = current_tx          # already in corridor, no change
+else:
+    recommended_tx = clamp(current_tx + shift, radio_min_tx, radio_max_tx)
 ```
+
+The in-corridor check takes priority: if the average neighbor RSSI already falls within the target corridor, no recommendation is made regardless of the shift value. This prevents unnecessary changes when the signal is at a corridor boundary.
 
 The derived TX shift uses **ceiling rounding** before the clamp is applied. Half steps therefore prefer the next higher whole-dBm recommendation instead of rounding down.
 
@@ -51,7 +71,7 @@ The derived TX shift uses **ceiling rounding** before the clamp is applied. Half
 The hysteresis is asymmetric:
 
 - increases are applied from `+1 dBm`
-- reductions are suppressed until at least `-2 dBm`
+- reductions are suppressed until at least `-3 dBm`
 - hardware limits still win immediately
 
 In simplified form:
@@ -60,9 +80,11 @@ In simplified form:
 if delta_tx > 0 and delta_tx < 1 and recommended_tx != radio_max_tx:
     recommended_tx = current_tx
 
-if delta_tx < 0 and |delta_tx| < 2 and recommended_tx != radio_min_tx:
+if delta_tx < 0 and |delta_tx| < 3:
     recommended_tx = current_tx
 ```
+
+The asymmetry reflects the cost difference: insufficient TX power causes coverage gaps and dropped connections, while slightly excessive TX power only creates mild cell overlap. The reduction threshold of 3 dBm is chosen to exceed the typical `iw scan` measurement noise of ±2–3 dBm, so that a reduction is only recommended when the signal is genuinely above the corridor.
 
 Roaming Assistant and Minimum RSSI are fixed values — no hysteresis.
 

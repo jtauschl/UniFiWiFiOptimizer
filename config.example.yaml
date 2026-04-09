@@ -12,6 +12,11 @@ sites:
     # Open, Residential, Office, Obstructed, or a custom path-loss exponent
     environment: Residential
 
+    # Number of round-robin scan passes per run (default: 1).
+    # Use 3 or more to enable noise filtering via trimmed mean.
+    # Each additional pass repeats the full AP scan sequence and adds scan time.
+    scan_passes: 3
+
     # Standard, IoT, Hotspot, Throughput, or Latency
     wlans:
       YOUR_WIFI: Throughput
