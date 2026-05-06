@@ -12,7 +12,7 @@ WLAN profile checks provide supporting best-practice guidance alongside the RF c
 The script uses AP-to-AP neighbor RSSI as a proxy for cell overlap:
 
 - **TX Power** targets the center of a corridor derived from the RF environment
-- **Roaming Assistant** is fixed at the design overlap point (`ROAM_TARGET` = −67 dBm)
+- **Roaming Assistant** is per AP: default = `TX_LO + ROAM_OFFSET_DB`, capped against the weakest neighbor when that neighbor is below the target corridor, then clamped to `[ROAM_FLOOR, ROAM_CEILING]`
 - **Minimum RSSI** is derived from the lower corridor bound (`TX_LO`) and can be enabled selectively
 
 The script implements this by comparing measured neighbor RSSI against a derived target corridor and converting the delta into per-radio recommendations.
@@ -86,16 +86,17 @@ if delta_tx < 0 and |delta_tx| < 3:
 
 The asymmetry reflects the cost difference: insufficient TX power causes coverage gaps and dropped connections, while slightly excessive TX power only creates mild cell overlap. The reduction threshold of 3 dBm is chosen to exceed the typical `iw scan` measurement noise of ±2–3 dBm, so that a reduction is only recommended when the signal is genuinely above the corridor.
 
-Roaming Assistant and Minimum RSSI are fixed values — no hysteresis.
+Minimum RSSI is a fixed value — no hysteresis. Roaming Assistant is per AP (see §7) but does not use hysteresis either: the recommendation is computed from the latest scan, the same way `TX_LO` is derived.
 
 ### Coverage warnings
 
-Warnings appear only when the uncapped TX recommendation **exceeds a hardware limit** and neighbors are still outside the corridor:
+Two distinct diagnoses are emitted per neighbor:
 
-- `tx_uncapped > radio_max_tx` and projected RSSI < `TX_LO` → **coverage gap**
-- `tx_uncapped < radio_min_tx` and projected RSSI > `TX_HI` → **excess overlap**
+- `*` **Coverage gap** — emitted when even at the radio's TX limit the projected RSSI stays below `TX_LO` (`tx_uncapped > radio_max_tx` and projected RSSI < `TX_LO`). This means TX adjustment cannot fix the situation; the AP placement, antenna orientation, or an additional AP needs to be considered.
+- `*` **Excess overlap** — emitted when even at the radio's TX minimum the projected RSSI stays above `TX_HI` (`tx_uncapped < radio_min_tx` and projected RSSI > `TX_HI`). Symmetric counterpart of the coverage gap.
+- `°` **Below corridor before TX adjustment** — emitted when the *raw* measured RSSI is below `TX_LO`, regardless of whether the TX recommendation can correct it. This is informational: the recommended TX shift may or may not lift the projected signal back into the corridor, and the Roaming Assistant cap (§7) reflects this neighbor as an input.
 
-Affected neighbors are flagged with `*`. This typically indicates uneven AP spacing or obstacles.
+The `°` marker is suppressed for a neighbor that is already flagged with `*`, since the harder coverage-gap statement supersedes it.
 
 ## 5. TX Corridor Derivation
 
@@ -113,11 +114,17 @@ TX_HI = TX_LO + CORRIDOR_WIDTH
 
 | Constant | Value | Source |
 |----------|-------|--------|
-| `ROAM_TARGET` | −67 dBm | Cisco VoWLAN design guideline: −67 dBm cell edge |
+| `ROAM_TARGET` | −67 dBm | Cisco VoWLAN cell-edge anchor for the path-loss model (not the per-AP threshold) |
 | `OVERLAP_DIST` | 60% | ~20% cell area overlap → 60% of AP-to-AP distance |
 | `CORRIDOR_WIDTH` | 6 dB | Symmetric tolerance around corridor center |
+| `ROAM_OFFSET_DB` | 0 | Per-AP Roaming Assistant offset relative to `TX_LO` (set to 9 to reproduce the legacy −67 dBm value at Obstructed) |
+| `ROAM_MARGIN_DB` | 5 | Safety margin between weakest neighbor RSSI and the capped threshold |
+| `ROAM_FLOOR` | −78 dBm | Stability floor — below this, Roaming Assistant becomes pointless |
+| `ROAM_CEILING` | −67 dBm | Hard ceiling for the Roaming Assistant recommendation |
 
 `CORRIDOR_WIDTH` is a practical tolerance around the target overlap corridor. The current value of `6 dB` provides enough margin for normal variation and asymmetry without making the target corridor too loose to be useful.
+
+`ROAM_FLOOR` and `ROAM_CEILING` are expert knobs (allowed range −95..−50 dBm). `ROAM_FLOOR` should normally stay at or below `TX_LO` for the configured environment; raising it (e.g. `ROAM_FLOOR=-60` on a `Residential` site with `TX_LO=-73`) clamps the site-aware default upward and turns the floor into an active, more aggressive trigger.
 
 ### Environment Presets
 
@@ -139,28 +146,55 @@ The same TX_LO/TX_HI apply to all bands.
 recommended_min_rssi = TX_LO
 ```
 
-Fixed value from the corridor, not from measurements. Acts as a hard disconnect threshold — the AP stops serving a client when its signal drops below `TX_LO`. This gives a `CORRIDOR_WIDTH` (6 dB) margin below the roaming threshold.
+Fixed value from the corridor, not from measurements. Acts as a hard disconnect threshold — the AP stops serving a client when its signal drops below `TX_LO`.
+
+### Relationship to Roaming Assistant
+
+**With `ROAM_OFFSET_DB=0`, Roaming Assistant and Minimum RSSI sit at the same level (`TX_LO`). If you enable Minimum RSSI and want a soft-roam (BTM) lead time before the hard disconnect, set a positive `ROAM_OFFSET_DB` (for example `3`).**
+
+The default targets SOHO deployments where voice-style roaming is rare and Minimum RSSI is typically left disabled. Voice or realtime use cases that need a deliberate BTM lead time should set `ROAM_OFFSET_DB` explicitly.
+
+For the default environment presets (`Open`, `Residential`, `Office`, `Obstructed`), `TX_LO` is between −72 and −76 dBm and `ROAM_FLOOR` is `−78`, so on APs where the coverage-gap cap engages, Roaming Assistant can drop below `TX_LO`. In that case the BTM request would be issued *after* Minimum RSSI would already have disconnected the client, so enabling Minimum RSSI on coverage-gap APs is not recommended. With a custom path-loss exponent that produces `TX_LO ≤ ROAM_FLOOR`, the cap cannot push Roaming Assistant below `TX_LO` at all.
 
 The recommendation is always derived, but whether you enable it is a deployment choice. It is most useful when cells are planned, overlap exists, and sticky clients need to be reduced.
 
+### Why WLAN profiles do not influence Roaming Assistant or Minimum RSSI
+
+The shipped WLAN profiles (Standard, IoT, Hotspot, Throughput, Latency) control SSID-level settings: authentication, DTIM, UAPSD, fast-roaming toggle, minimum data rate, multicast handling. Roaming Assistant and Minimum RSSI are radio-level settings — one value per radio, regardless of how many SSIDs the radio carries. Because a single radio typically serves SSIDs from multiple profiles at the same time, a per-profile Roaming/Min-RSSI value cannot be applied cleanly. The decision stays explicit (via `ROAM_OFFSET_DB`) instead of being inferred from profile assignments.
+
 ## 7. Roaming Assistant
 
+Recommended only on 5 GHz. The threshold is computed per AP from `TX_LO` and the weakest neighbor RSSI:
+
 ```text
-roaming_assistant = ROAM_TARGET = −67 dBm
+default = TX_LO + ROAM_OFFSET_DB
+
+if min(neighbor_rssi) < TX_LO:                # weakest neighbor below corridor
+    cap = min(neighbor_rssi) - ROAM_MARGIN_DB
+    threshold = min(default, cap)
+else:
+    threshold = default
+
+threshold = clamp(threshold, ROAM_FLOOR, ROAM_CEILING)
 ```
 
-Fixed, independent of environment or band. Sends an 802.11v BSS Transition Management (BTM) request when a client's signal drops to `ROAM_TARGET`. BTM is advisory — the client may ignore it. If the client turns around, signal improves and no roaming is triggered.
+`ROAM_OFFSET_DB=0` keeps the threshold at the lower corridor edge, which matches the published roaming triggers of common clients (Apple iPhone/iPad ~−70 dBm, Mac ~−75 dBm; Aruba ClientMatch sticky-min default −70 dBm). The legacy fixed value of −67 dBm can be reproduced by setting `ROAM_OFFSET_DB=9` at Obstructed.
 
-The asymmetric 60%/40% overlap design reduces ping-pong risk:
+The cap only triggers when the weakest neighbor is below `TX_LO`. APs whose worst neighbor is still inside the corridor keep the default — measurement noise around `TX_LO` does not pull the threshold down.
 
-- current AP sees client at −67 dBm → sends BTM
-- client is already closer to neighbor → neighbor receives client above −67 dBm
-- after roaming, client is well above threshold on new AP → no immediate BTM
+When the cap engages, the AP report shows one of two warnings depending on which mechanism set the final value:
+
+- **`Roaming Assistant lowered to X dBm`** — the weakest neighbor is below `TX_LO`, so `min(neighbor) − ROAM_MARGIN_DB` is used (and is still above `ROAM_FLOOR`). The threshold tracks coverage but stays in usable territory.
+- **`Roaming Assistant clamped to ROAM_FLOOR (X dBm)`** — `min(neighbor) − ROAM_MARGIN_DB` would fall below `ROAM_FLOOR` and is clamped. This is a stability floor, not a quality target: it prevents aggressive BTM requests at APs that have no reachable roaming neighbor, but it does not fix the underlying coverage problem.
+
+The Roaming Assistant sends an 802.11v BSS Transition Management (BTM) request when a client's signal drops to the threshold. BTM is advisory — the client may ignore it.
 
 | Recommendation | Value | Enabled by default? |
 |----------------|-------|---------------------|
-| Roaming Assistant | −67 dBm | Yes |
+| Roaming Assistant | per AP, default `TX_LO + ROAM_OFFSET_DB`, clamped to `[ROAM_FLOOR, ROAM_CEILING]` | Yes (5 GHz only) |
 | Minimum RSSI | `TX_LO` | Use selectively |
+
+WLAN profiles do not influence this recommendation; see §6 for the rationale.
 
 ## 8. Channel Width Planning
 

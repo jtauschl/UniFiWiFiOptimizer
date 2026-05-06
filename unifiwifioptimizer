@@ -31,7 +31,9 @@ WLAN_FIELD_SEP=$'\037'
 #   CELL_OVERLAP   =  20 %     cell area overlap between neighbor APs
 #
 # Derived constants:
-#   ROAM_TARGET    = -67 dBm   roaming threshold at the overlap point
+#   ROAM_TARGET    = -67 dBm   VoWLAN cell-edge anchor for the path-loss model
+#                              (the per-AP Roaming Assistant threshold is computed
+#                              separately, see ALGORITHM.md §7)
 #   OVERLAP_DIST   =  60 %     distance ratio corresponding to ~20% area overlap
 #   CORRIDOR_WIDTH =   6 dB    symmetric tolerance around corridor center
 #
@@ -41,9 +43,18 @@ WLAN_FIELD_SEP=$'\037'
 #     TX_HI = TX_LO + CORRIDOR_WIDTH
 #
 #   n is site-specific, set via config.yaml (sites.<site>.environment).
-ROAM_TARGET=-67   # RSSI at the overlap point (dBm) — Cisco VoWLAN: -67 dBm cell edge
+ROAM_TARGET=-67   # VoWLAN cell-edge anchor for the path-loss model (NOT the per-AP threshold)
 OVERLAP_DIST=60   # overlap point as % of AP-to-AP distance (~20% area overlap)
 CORRIDOR_WIDTH=6  # corridor width in dB
+
+# Roaming Assistant per-AP recommendation (see ALGORITHM.md §7).
+# Default = TX_LO + ROAM_OFFSET_DB. Capped against weakest neighbor only when
+# that neighbor is below TX_LO (weakest-neighbor-below-corridor), then clamped to [FLOOR, CEILING].
+# ROAM_OFFSET_DB=9 reproduces the legacy voice value of -67 dBm for Obstructed.
+ROAM_OFFSET_DB=${ROAM_OFFSET_DB:-0}
+ROAM_MARGIN_DB=${ROAM_MARGIN_DB:-5}
+ROAM_FLOOR=${ROAM_FLOOR:--78}
+ROAM_CEILING=${ROAM_CEILING:--67}
 #
 # Path loss exponent n: set environment per site in config.yaml (default: Residential)
 # Values are derived from ITU-R P.1238 Table 2, using n where ITU expresses
@@ -63,6 +74,47 @@ TX_MAX=23
 HYSTERESIS_UP_DB=1
 HYSTERESIS_DOWN_DB=3
 SCAN_ATTEMPTS=2
+
+# Validate the user-overridable Roaming Assistant tunables. These are read from
+# the environment, used in arithmetic expansions, and now documented as knobs;
+# a typo such as ROAM_OFFSET_DB=foo would otherwise cause an opaque arithmetic
+# error mid-run. Failing here keeps the error message close to the cause.
+validate_roam_constants() {
+  local var
+  for var in ROAM_OFFSET_DB ROAM_MARGIN_DB ROAM_FLOOR ROAM_CEILING; do
+    if ! [[ "${!var}" =~ ^-?[0-9]+$ ]]; then
+      printf 'ERROR: %s must be an integer (got: %s)\n' "$var" "${!var}" >&2
+      exit 1
+    fi
+  done
+  # Offset/margin in dB. Upper bound 30 dB is generous; values beyond that
+  # would shift the threshold across the entire useful RSSI range.
+  if (( ROAM_OFFSET_DB < 0 || ROAM_OFFSET_DB > 30 )); then
+    printf 'ERROR: ROAM_OFFSET_DB must be in 0..30 dB (got: %d)\n' "$ROAM_OFFSET_DB" >&2
+    exit 1
+  fi
+  if (( ROAM_MARGIN_DB < 0 || ROAM_MARGIN_DB > 30 )); then
+    printf 'ERROR: ROAM_MARGIN_DB must be in 0..30 dB (got: %d)\n' "$ROAM_MARGIN_DB" >&2
+    exit 1
+  fi
+  # Floor/ceiling are RSSI dBm values used as bounds for the Roaming Assistant
+  # threshold. Range -95..-50 dBm: -95 is around the typical noise floor;
+  # -50 is the upper edge of plausible roaming-trigger territory. Above -50
+  # the threshold would fire while clients are still right next to an AP,
+  # which makes Roaming Assistant unusable.
+  for var in ROAM_FLOOR ROAM_CEILING; do
+    if (( ${!var} < -95 || ${!var} > -50 )); then
+      printf 'ERROR: %s must be in -95..-50 dBm (got: %d)\n' "$var" "${!var}" >&2
+      exit 1
+    fi
+  done
+  if (( ROAM_FLOOR >= ROAM_CEILING )); then
+    printf 'ERROR: ROAM_FLOOR (%d) must be lower than ROAM_CEILING (%d)\n' \
+      "$ROAM_FLOOR" "$ROAM_CEILING" >&2
+    exit 1
+  fi
+}
+validate_roam_constants
 
 # Output colors and label widths used by the terminal report
 RED=$'\e[31m'
@@ -1594,6 +1646,48 @@ calculate_min_rssi_recommendation() {
   _result=$TX_LO
 }
 
+# Per-AP Roaming Assistant threshold.
+# Default = TX_LO + ROAM_OFFSET_DB (site-aware via path-loss exponent).
+# Cap = min(neighbor) - ROAM_MARGIN_DB, but only when min(neighbor) < TX_LO,
+# i.e. only when the weakest neighbor is below the target corridor. APs
+# whose worst neighbor is still inside the corridor keep the default; the
+# cap is not allowed to punish well-placed APs based on noise-level rounding.
+# Result is clamped to [ROAM_FLOOR, ROAM_CEILING].
+# Args: $1 = min observed neighbor RSSI (empty if no peers seen).
+# Writes:
+#   _result        recommended threshold in dBm
+#   _roam_warn     "" | "capped_by_margin" | "capped_by_floor"
+#                  - capped_by_margin: min(nbr)-margin pulled the threshold
+#                    below the default and is still above ROAM_FLOOR
+#                  - capped_by_floor:  min(nbr)-margin would go below
+#                    ROAM_FLOOR and was clamped to it
+#   _roam_raw_cap  the uncapped min(nbr)-margin value (for output context),
+#                  empty when no cap was applied
+calculate_roaming_recommendation() {
+  local min_nbr=${1:-}
+  local default_thr=$(( TX_LO + ROAM_OFFSET_DB ))
+  local capped=$default_thr
+  _roam_warn=""
+  _roam_raw_cap=""
+
+  if [[ -n "$min_nbr" ]] && (( min_nbr < TX_LO )); then
+    local nbr_cap=$(( min_nbr - ROAM_MARGIN_DB ))
+    if (( nbr_cap < capped )); then
+      capped=$nbr_cap
+      _roam_raw_cap=$nbr_cap
+      if (( nbr_cap < ROAM_FLOOR )); then
+        _roam_warn="capped_by_floor"
+      else
+        _roam_warn="capped_by_margin"
+      fi
+    fi
+  fi
+
+  (( capped < ROAM_FLOOR )) && capped=$ROAM_FLOOR
+  (( capped > ROAM_CEILING )) && capped=$ROAM_CEILING
+  _result=$capped
+}
+
 # ============================================================================
 # Output Functions
 # ============================================================================
@@ -1903,9 +1997,9 @@ print_neighbor_header() {
 }
 
 print_neighbor_row() {
-  local peer=$1 rssi=$2 starred=${3:-}
+  local peer=$1 rssi=$2 marker=${3:-}
   local rssi_str="${rssi} dBm"
-  [[ -n "$starred" ]] && rssi_str+=" *"
+  [[ -n "$marker" ]] && rssi_str+=" ${marker}"
   printf "  %-14s  %s\n" "$peer" "$rssi_str"
 }
 
@@ -2424,8 +2518,9 @@ analyze_band() {
   local peer_channel peer_width overlap_warn=""
   local _sum_rssi=0 _count_nbr=0 _i=0 _delta _shift_applied _proj
   local shift peer peer_prefix peer_cache rssi_to _j peer_radio_info
-  local _warn_lo="" _warn_hi="" _missing_warn=""
+  local _warn_lo="" _warn_lo_raw="" _warn_hi="" _missing_warn=""
   local _nbr_peer=() _nbr_rssi=() _nbr_warn=()
+  local _min_nbr_rssi="" _roam_warn="" _roam_raw_cap=""
   local _missing_peer=()
   local _overlap_peer=()
 
@@ -2478,6 +2573,9 @@ analyze_band() {
     if [[ -n "$rssi_to" ]]; then
       _nbr_peer+=("$peer")
       _nbr_rssi+=("$rssi_to")
+      if [[ -z "$_min_nbr_rssi" ]] || (( rssi_to < _min_nbr_rssi )); then
+        _min_nbr_rssi=$rssi_to
+      fi
       _sum_rssi=$(( _sum_rssi + rssi_to ))
       _count_nbr=$(( _count_nbr + 1 ))
     else
@@ -2506,6 +2604,10 @@ analyze_band() {
     fi
 
     calculate_min_rssi_recommendation; rec_rssi=$_result
+    if [[ "$band_key" == "5g" ]]; then
+      calculate_roaming_recommendation "$_min_nbr_rssi"
+      roam_recommended=$_result
+    fi
   fi
 
   if (( ${#_missing_peer[@]} > 0 )); then
@@ -2516,11 +2618,23 @@ analyze_band() {
   fi
 
   if [[ $_count_nbr -gt 0 ]]; then
+    # Two separate diagnoses for weak neighbors:
+    #   lo_raw:       raw RSSI is already below TX_LO. Indicative, but does
+    #                 not imply the situation is unfixable — TX recommendation
+    #                 may still pull the projected signal into the corridor.
+    #   lo_unfixable: even at the radio's TX limit, the projected RSSI stays
+    #                 below TX_LO. This is a hard coverage gap and the
+    #                 traditional "Coverage gap" warning.
+    # lo_unfixable wins over lo_raw on the same neighbor.
+    for _j in "${!_nbr_peer[@]}"; do
+      (( _nbr_rssi[_j] < TX_LO )) && _nbr_warn[_j]="lo_raw"
+    done
+
     _shift_applied=$(( rec_tx - tx ))
     if (( tx_uncapped > max_tx )); then
       for _j in "${!_nbr_peer[@]}"; do
         _proj=$(( _nbr_rssi[_j] + _shift_applied ))
-        (( _proj < TX_LO )) && _nbr_warn[_j]="lo"
+        (( _proj < TX_LO )) && _nbr_warn[_j]="lo_unfixable"
       done
     elif (( tx_uncapped < min_tx )); then
       for _j in "${!_nbr_peer[@]}"; do
@@ -2532,15 +2646,19 @@ analyze_band() {
 
   print_neighbor_header
   for _j in "${!_nbr_peer[@]}"; do
-    _starred=""
-    [[ "${_nbr_warn[$_j]:-}" != "" ]] && _starred="*"
-    print_neighbor_row "${_nbr_peer[$_j]}" "${_nbr_rssi[$_j]}" "$_starred"
+    case "${_nbr_warn[$_j]:-}" in
+      lo_raw) _marker="°" ;;
+      lo_unfixable|hi) _marker="*" ;;
+      *) _marker="" ;;
+    esac
+    print_neighbor_row "${_nbr_peer[$_j]}" "${_nbr_rssi[$_j]}" "$_marker"
   done
 
   for _j in "${!_nbr_peer[@]}"; do
     case "${_nbr_warn[$_j]:-}" in
-      lo) _warn_lo+="${_nbr_peer[$_j]} " ;;
-      hi) _warn_hi+="${_nbr_peer[$_j]} " ;;
+      lo_raw)       _warn_lo_raw+="${_nbr_peer[$_j]} " ;;
+      lo_unfixable) _warn_lo+="${_nbr_peer[$_j]} " ;;
+      hi)           _warn_hi+="${_nbr_peer[$_j]} " ;;
     esac
   done
 
@@ -2548,10 +2666,26 @@ analyze_band() {
     printf "\n  ${YELLOW}* Coverage gap – signal too weak at: %s${RESET}\n" "${_warn_lo% }"
     printf '  %s  Consider repositioning this AP or adding a neighbor AP.%s\n' "$YELLOW" "$RESET"
   fi
+  if [[ -n "$_warn_lo_raw" ]]; then
+    printf "\n  ${YELLOW}° Below corridor before TX adjustment at: %s${RESET}\n" "${_warn_lo_raw% }"
+    printf '  %s  Raw RSSI is below TX_LO; the TX recommendation may or may not bring this neighbor back into the corridor.%s\n' "$YELLOW" "$RESET"
+  fi
   if [[ -n "$_warn_hi" ]]; then
     printf "\n  ${YELLOW}* Excess overlap – signal too strong at: %s${RESET}\n" "${_warn_hi% }"
     printf '  %s  Consider repositioning or removing this AP.%s\n' "$YELLOW" "$RESET"
   fi
+  case "$_roam_warn" in
+    capped_by_margin)
+      printf "\n  ${YELLOW}* Roaming Assistant lowered to %d dBm: weakest neighbor %d dBm is below TX_LO (%d dBm), threshold tracks min(neighbor) − %d dB margin.${RESET}\n" \
+        "$roam_recommended" "$_min_nbr_rssi" "$TX_LO" "$ROAM_MARGIN_DB"
+      printf '  %s  Coverage-limited recommendation — fix AP placement; threshold tuning cannot replace overlap.%s\n' "$YELLOW" "$RESET"
+      ;;
+    capped_by_floor)
+      printf "\n  ${YELLOW}* Roaming Assistant clamped to ROAM_FLOOR (%d dBm): weakest neighbor %d dBm would yield %d dBm (below floor).${RESET}\n" \
+        "$roam_recommended" "$_min_nbr_rssi" "$_roam_raw_cap"
+      printf '  %s  No reachable roaming neighbor at this AP — fix AP placement; threshold tuning cannot replace overlap.%s\n' "$YELLOW" "$RESET"
+      ;;
+  esac
   if (( ${#_missing_peer[@]} > 0 )); then
     _missing_warn="${_missing_peer[*]}"
     printf "\n  ${YELLOW}* Adjacent APs without sighting: %s${RESET}\n" "$_missing_warn"
@@ -2789,7 +2923,6 @@ while IFS=$'\t' read -r site n env_label _ssh_user _ssh_password; do
   print_environment_header
   printf "  %-26s %s\n"              "Environment:"            "$env_label"
   printf "  %-26s %d dBm to %d dBm\n" "Target RSSI @ Neighbor:" "$TX_LO" "$TX_HI"
-  printf "  %-26s %d dBm\n"           "Roaming Assistant:"      "$ROAM_TARGET"
   printf "  %-26s %d dBm\n"            "Minimum RSSI:"          "$TX_LO"
   echo
 

@@ -16,6 +16,10 @@ The shipped profiles map either to current UniFi defaults (`Standard`, `IoT`) or
 
 AP recommendations are derived from AP-to-AP neighbor scan RSSI and target the long-established practical design goal of about 20% cell overlap at -67 dBm, adjusted for the configured RF environment such as open space, office, or obstructed layouts.
 
+The Roaming Assistant threshold is computed per AP from the corridor lower bound `TX_LO`. When the weakest neighbor falls below the corridor, the threshold is additionally capped against that neighbor instead of using a fixed -67 dBm for every AP.
+
+AP-level recommendations (TX power, Roaming Assistant, Minimum RSSI) are radio-scoped in UniFi and are not derived from the WLAN profile assigned to an SSID.
+
 All recommendations are applied manually in UniFi Network. The SSH neighbor scan detects scan-capable interfaces automatically: on MediaTek-based APs (U6 family) it uses the dedicated managed interfaces (`apcli0`/`apclii0`); on Qualcomm-based APs (U7 family) it uses AP interfaces that advertise the `SET_SCAN_DWELL` PHY capability. Both approaches perform off-channel scanning while maintaining client service.
 
 For the full RF derivation, see [docs/ALGORITHM.md](docs/ALGORITHM.md).
