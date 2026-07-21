@@ -214,6 +214,12 @@ Configure `Band Steering` manually in UniFi Network.
 chmod 600 config.yaml
 ```
 
+## Security Notes
+
+- **TLS certificate verification is disabled** (`curl -k`) for calls to the UniFi controller — controllers ship a self-signed certificate by default, and the URL is always the one from local `config.yaml`, never derived from API output or other untrusted input.
+- **SSH host-key verification is disabled** (`StrictHostKeyChecking=no`) for the AP neighbor scan — AP host keys aren't pre-provisioned or pinned anywhere reachable from this tool, and the host is always the AP IP/hostname from local config.
+- Both are deliberate, accepted tradeoffs for a tool targeting a trusted local network, not oversights. If you're scanning across an untrusted network boundary, don't rely on this tool's transport security.
+
 ## Scope and Limits
 
 Designed for homelabs, homes, apartments, and small to medium offices with manually managed UniFi deployments and known AP neighbor relationships.

@@ -175,6 +175,9 @@ print_api_unavailable_note() {
 fetch_api_json() {
   local endpoint=$1 output_path=$2 timeout=${3:-15}
 
+  # -k: UniFi controllers ship a self-signed cert by default; this tool only
+  # ever talks to the controller URL from local config, never a URL from API
+  # output or other untrusted input (see README.md#security-notes).
   if ! curl -k -s -f --max-time "$timeout" \
     -H "X-API-KEY: ${UNIFI_API_KEY}" \
     -H "Accept: application/json" \
@@ -562,13 +565,16 @@ count_site_access_points() {
   local site=$1
 
   fetch_site_devices "$site"
-  python3 - "$(site_devices_json_path "$site")" <<'PY'
+  if ! python3 - "$(site_devices_json_path "$site")" <<'PY'
 import json
 import sys
 
 devices_path = sys.argv[1]
-with open(devices_path, "r", encoding="utf-8") as handle:
-    data = json.load(handle).get("data", [])
+try:
+    with open(devices_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle).get("data", [])
+except Exception:
+    sys.exit(1)
 
 count = 0
 for device in data:
@@ -577,6 +583,10 @@ for device in data:
 
 print(count)
 PY
+  then
+    print_api_unavailable_note
+    echo "?"
+  fi
 }
 
 build_site_inventory() {
@@ -638,8 +648,12 @@ with open(wlans_path, "r", encoding="utf-8") as handle:
             continue
         required_wlans.add(wlan_name)
 
-with open(devices_path, "r", encoding="utf-8") as handle:
-    data = json.load(handle).get("data", [])
+try:
+    with open(devices_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle).get("data", [])
+except Exception:
+    sys.stderr.write(f'ERROR: Could not parse device data for site "{site_name}".\n')
+    sys.exit(1)
 
 aps = {}
 duplicates = set()
@@ -789,13 +803,16 @@ show_site_env() {
   echo
 
   echo "  Access Points:"
-  python3 - "$(site_devices_json_path "$site_id")" <<'PY'
+  if ! python3 - "$(site_devices_json_path "$site_id")" <<'PY'
 import json
 import sys
 
 devices_path = sys.argv[1]
-with open(devices_path, "r", encoding="utf-8") as handle:
-    data = json.load(handle)
+try:
+    with open(devices_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
 
 devices = []
 for device in data.get("data", []):
@@ -817,6 +834,10 @@ else:
     for name, state, ip, mac in sorted(devices, key=lambda row: row[0]):
         print(f"    {name:<13} {state:<7} {ip:<14} {mac}")
 PY
+  then
+    print_api_unavailable_note
+    return 1
+  fi
   echo
 }
 
@@ -874,8 +895,12 @@ with open(wlans_path, "r", encoding="utf-8") as handle:
         if fields:
             wlans.append(fields[0])
 
-with open(devices_path, "r", encoding="utf-8") as handle:
-    data = json.load(handle)
+try:
+    with open(devices_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.stderr.write(f'ERROR: Could not parse device data for site "{site_id}".\n')
+    sys.exit(1)
 
 ssh_user = "YOUR_SSH_USER"
 try:
@@ -1222,6 +1247,9 @@ printf 'MODEL_NAME=%s\n' "$(get_device_model_name)"
 printf 'DFS_CAC_5G=%s\n' "$(u6_dfs_cac_state_5g)"
 SCAN
 
+  # StrictHostKeyChecking=no: AP host keys aren't pre-provisioned or pinned
+  # anywhere reachable from this tool; the host is always the AP IP/hostname
+  # from local config, not derived from untrusted input (see README.md#security-notes).
   local ssh_opts=(
     -o ConnectTimeout=5
     -o StrictHostKeyChecking=no
