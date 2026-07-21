@@ -223,3 +223,5 @@ Does not replace AP placement, channel planning, site surveys, capacity planning
 ## References
 
 - Ubiquiti: [UniFi WiFi SSID and AP Settings Overview](https://help.ui.com/hc/en-us/articles/32065480092951-UniFi-WiFi-SSID-level-Settings-Overview)
+
+Internal engineering notes (vision, ADRs, findings) live in the private [unifiwifioptimizer-docs](https://github.com/jtauschl/unifiwifioptimizer-docs) companion repo.
