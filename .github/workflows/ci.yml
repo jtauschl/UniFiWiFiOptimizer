@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Shell (bash -n, shellcheck, shfmt, actionlint, smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck, shfmt, actionlint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: ./dev ci
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v6.0.0
+        with:
+          python-version: "3.12"
+      - name: Install semgrep
+        run: pip install semgrep==1.140.0
+      - name: Run semgrep
+        run: semgrep ci --config p/bash --config p/security-audit --config p/secrets
+
+  ci-success:
+    name: CI success (aggregator)
+    needs: [shell, semgrep]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check all required jobs succeeded
+        env:
+          SHELL_RESULT: ${{ needs.shell.result }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
+        run: |
+          echo "shell=$SHELL_RESULT"
+          echo "semgrep=$SEMGREP_RESULT"
+          if [[ "$SHELL_RESULT" != "success" || "$SEMGREP_RESULT" != "success" ]]; then
+            echo "One or more required jobs did not succeed." >&2
+            exit 1
+          fi

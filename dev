@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# dev — repo-local convenience wrapper (bash, per dev_policies v0.6.0).
+#
+# Commands:
+#   ./dev ci    Run every gate CI runs: bash -n, shellcheck, shfmt -d,
+#               actionlint (if any workflows), smoke test.
+#   ./dev fmt   Apply shfmt formatting in place.
+#   ./dev lint  Run shellcheck alone.
+#
+# Missing tools hard-fail with install hints (v0.6.0 pattern).
+set -euo pipefail
+cd "$(dirname "$0")"
+
+shell_scripts=(
+  unifiwifioptimizer
+  dev
+  scripts/install.sh
+  scripts/uninstall.sh
+)
+
+require() {
+  local tool=$1 hint=$2
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "$tool not found — install: $hint" >&2
+    exit 1
+  fi
+}
+
+run_bash_syntax() {
+  for f in "${shell_scripts[@]}"; do
+    [[ -f "$f" ]] || continue
+    bash -n "$f"
+  done
+}
+
+run_shellcheck() {
+  require shellcheck "brew install shellcheck (macOS) / apt-get install shellcheck (Debian)"
+  local present=()
+  for f in "${shell_scripts[@]}"; do
+    [[ -f "$f" ]] && present+=("$f")
+  done
+  shellcheck -x "${present[@]}"
+}
+
+run_shfmt_diff() {
+  require shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1"
+  local present=()
+  for f in "${shell_scripts[@]}"; do
+    [[ -f "$f" ]] && present+=("$f")
+  done
+  shfmt -d "${present[@]}"
+}
+
+run_shfmt_write() {
+  require shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1"
+  local present=()
+  for f in "${shell_scripts[@]}"; do
+    [[ -f "$f" ]] && present+=("$f")
+  done
+  shfmt -w "${present[@]}"
+}
+
+run_actionlint() {
+  if ! compgen -G ".github/workflows/*.yml" >/dev/null; then
+    return 0
+  fi
+  require actionlint "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12"
+  actionlint
+}
+
+run_smoke() {
+  ./unifiwifioptimizer --help >/dev/null
+}
+
+cmd="${1:-}"
+case "$cmd" in
+ci)
+  run_bash_syntax
+  run_shellcheck
+  run_shfmt_diff
+  run_actionlint
+  run_smoke
+  echo "dev ci: OK"
+  ;;
+fmt)
+  run_shfmt_write
+  ;;
+lint)
+  run_shellcheck
+  ;;
+*)
+  echo "usage: ./dev {ci|fmt|lint}"
+  exit 1
+  ;;
+esac

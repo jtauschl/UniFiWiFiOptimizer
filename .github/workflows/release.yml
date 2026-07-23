@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Extract release notes for this tag from CHANGELOG.md
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          notes_file="$(mktemp)"
+          awk -v ver="$version" '
+            BEGIN { in_section = 0 }
+            /^## \[/ {
+              if (in_section) exit
+              if (index($0, "[" ver "]") > 0) { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md > "$notes_file"
+
+          if [[ ! -s "$notes_file" ]]; then
+            echo "No CHANGELOG.md section for $TAG; falling back to auto-generated notes." >&2
+            echo "notes_file=" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          if [[ -n "$NOTES_FILE" ]]; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file "$NOTES_FILE"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes
+          fi
