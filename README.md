@@ -231,3 +231,15 @@ Does not replace AP placement, channel planning, site surveys, capacity planning
 - Ubiquiti: [UniFi WiFi SSID and AP Settings Overview](https://help.ui.com/hc/en-us/articles/32065480092951-UniFi-WiFi-SSID-level-Settings-Overview)
 
 Internal engineering notes (vision, ADRs, findings) live in the private [unifiwifioptimizer-docs](https://github.com/jtauschl/unifiwifioptimizer-docs) companion repo.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the local workflow (`./dev ci` gate, commit conventions) and PR expectations.
+
+## Security
+
+Report suspected vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public GitHub issue for a suspected vulnerability.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

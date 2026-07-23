@@ -1,0 +1,7 @@
+# False-positive-only suppressions.
+# Format: one fingerprint per line (see `gitleaks git --report-format json`
+# for the "Fingerprint" field). Each entry MUST name the rule ID and a
+# one-line reason. Do NOT use this file to hide real secrets.
+#
+# Example:
+#   <file>:<rule-id>:<line>  # generic-api-key: docs example key, redacted
