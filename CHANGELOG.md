@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Roaming Assistant recommendations silently stopped working: Ubiquiti removed the per-radio API fields (`radio_table[].assisted_roaming_enabled`/`assisted_roaming_rssi`) at some point after v0.4.0, and the tool was falling back to defaults without any indication. Confirmed against a live controller (Network Application, AP firmware 6.7.54 and 8.7.11).
+- `roaming_wlan.tsv` used a plain tab as field separator while its `aggregated_rssi` field is legitimately empty for `na`/`not_evaluable`/`incomplete` rows; `IFS=$'\t' read` collapses adjacent tabs (tab is IFS whitespace), silently shifting every field after the empty one and, in the worst case, aborting under `set -u`. Migrated to the existing `WLAN_FIELD_SEP` (`\037`) convention already used elsewhere for TSV rows with optional empty fields.
+
+### Changed
+- Roaming Assistant migrated from a per-AP RF-tuning recommendation to a per-WLAN compliance check next to Fast Roaming, matching UniFi's move of the setting from radio level (`radio_table`) to WLAN level (`wlanconf.roaming_assistant_na_*`). The target threshold is still computed from the same site-aware corridor as before, aggregated (as a conservative minimum) across the APs that broadcast each WLAN, restricted to each AP's configured RF neighbors that also broadcast that SSID.
+- WLANs whose broadcasting APs have incomplete data (a broadcasting AP with no SSID-relevant RF neighbor, or a missing neighbor sighting) are reported `Incomplete` with the specific reason, instead of a ✓/✗ verdict computed from a partial data set.
+- On older controllers where no WLAN exposes the new field, the tool falls back site-wide to the previous per-AP behavior.
+
+### Added
+- `Handoff Suggestions (802.11v)` terminology note in `docs/ALGORITHM.md` §7 — UniFi renamed the controller UI label in Network Application 10.4.57; the API field name and this tool's terminology are unchanged.
+- TX power recommendation for AP/band pairs with a configured neighbor but zero sightings in the current scan: jumps straight to the radio's maximum TX power instead of leaving it unchanged, to maximize the chance of achieving a sighting on the next run. Once already at the radio maximum with no sighting, this is reported as a distinct informational state instead of a repeated "raised to maximum" change on every run. See `docs/ALGORITHM.md` §4 "Zero-sighting recovery" for the rationale and its deliberate departure from vendor TX-spread guidance.
+- "Fix TX power first" note next to an `Incomplete`/`Not evaluable` Roaming Assistant verdict when the site still has pending TX power recommendations — a missing sighting is often caused by TX power being too low to reach the neighbor.
+- `roaming_assistant` profile field: whether Roaming Assistant / "Handoff Suggestions (802.11v)" should be enabled at all for a WLAN, distinct from `fast_roaming` (802.11r) and `bss_transition` (802.11v protocol support itself). Only the on/off expectation is profile-driven — the RSSI threshold stays computed from the site's RF model. Shipped defaults: disabled for `Standard`/`IoT`/`Hotspot`, enabled for `Throughput`/`Latency`. A deviation is flagged (✗) the same way any other profile check is. See `docs/ALGORITHM.md` §7 "Enable/disable expectation".
+- `tests/roaming_test.sh`, `tests/tx_test.sh`, run automatically by `./dev ci`.
+
 ## [0.4.0] - 2026-05-06
 
 Per-AP Roaming Assistant computed from the site-aware corridor instead of a

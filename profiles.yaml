@@ -15,6 +15,12 @@ profiles:
   # - dtim_*: expected values when dtim_mode is custom
   # - group_rekey: always checked
   # - sae_*: checked when the WLAN uses a SAE-based security protocol
+  # - roaming_assistant: whether Roaming Assistant / "Handoff Suggestions
+  #   (802.11v)" should be enabled for this profile. Only the on/off
+  #   expectation is profile-driven -- the RSSI threshold itself is always
+  #   computed from the site's RF model (ALGORITHM.md §6/§7), never from the
+  #   profile. Distinct from fast_roaming (802.11r) and bss_transition
+  #   (the underlying 802.11v BSS Transition Management protocol support).
 
   # Baseline matching the current UniFi "Standard/Auto" 2.4/5 GHz WLAN behavior.
   Standard:
@@ -39,6 +45,7 @@ profiles:
     dtim_mode: default
     group_rekey: 0
     ap_name_in_beacon: false
+    roaming_assistant: false
 
   # Baseline matching the current UniFi "IoT/Auto" 2.4 GHz WLAN behavior.
   IoT:
@@ -62,6 +69,7 @@ profiles:
     dtim_mode: default
     group_rekey: 0
     ap_name_in_beacon: false
+    roaming_assistant: false
 
   # Public hotspot baseline, close to UniFi defaults with guest isolation.
   Hotspot:
@@ -86,6 +94,7 @@ profiles:
     dtim_mode: default
     group_rekey: 0
     ap_name_in_beacon: false
+    roaming_assistant: false
 
   # Throughput-oriented baseline for primary client WLANs on 2.4/5 GHz.
   Throughput:
@@ -115,6 +124,7 @@ profiles:
     dtim_5: 3
     group_rekey: 3600
     ap_name_in_beacon: false
+    roaming_assistant: true
 
   # Latency-oriented baseline for primary client WLANs on 2.4/5 GHz.
   Latency:
@@ -144,3 +154,4 @@ profiles:
     dtim_5: 1
     group_rekey: 3600
     ap_name_in_beacon: false
+    roaming_assistant: true

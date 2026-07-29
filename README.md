@@ -9,16 +9,16 @@
 `UniFi WiFi Optimizer` is a Bash tool for post-placement UniFi WLAN review and RF tuning.
 It reads radio configuration and WLAN settings from the UniFi Network API, compares them against shipped WLAN profiles, collects AP-to-AP neighbor scan data via SSH, and generates recommendations for:
 
-- profile-based WLAN best practices for Standard, IoT, Hotspot, Throughput, and Latency profiles
-- access point settings: `Transmit Power`, `Roaming Assistant`, `Minimum RSSI`
+- profile-based WLAN best practices for Standard, IoT, Hotspot, Throughput, and Latency profiles, including a Roaming Assistant compliance check
+- access point settings: `Transmit Power`, `Minimum RSSI`
 
 The shipped profiles map either to current UniFi defaults (`Standard`, `IoT`) or to optimized presets for specific use cases such as public hotspots, throughput-focused WLANs, and low-latency WLANs.
 
 AP recommendations are derived from AP-to-AP neighbor scan RSSI and target the long-established practical design goal of about 20% cell overlap at -67 dBm, adjusted for the configured RF environment such as open space, office, or obstructed layouts.
 
-The Roaming Assistant threshold is computed per AP from the corridor lower bound `TX_LO`. When the weakest neighbor falls below the corridor, the threshold is additionally capped against that neighbor instead of using a fixed -67 dBm for every AP.
+The Roaming Assistant threshold is computed per WLAN from the corridor lower bound `TX_LO`, aggregated (as a conservative minimum) across the APs that broadcast that WLAN. When the weakest relevant neighbor falls below the corridor, the threshold is additionally capped against that neighbor instead of using a fixed -67 dBm for every AP. (UniFi's controller UI renamed this setting to "Handoff Suggestions (802.11v)" in Network Application 10.4.57; the underlying API field was separately confirmed to have moved from radio level to WLAN level, though the exact version where that happened is unconfirmed — see [docs/ALGORITHM.md](docs/ALGORITHM.md#7-roaming-assistant).)
 
-AP-level recommendations (TX power, Roaming Assistant, Minimum RSSI) are radio-scoped in UniFi and are not derived from the WLAN profile assigned to an SSID.
+AP-level recommendations (TX power, Minimum RSSI) are radio-scoped in UniFi and are not derived from the WLAN profile assigned to an SSID; Roaming Assistant is WLAN-scoped and appears as a profile compliance check instead.
 
 All recommendations are applied manually in UniFi Network. The SSH neighbor scan detects scan-capable interfaces automatically: on MediaTek-based APs (U6 family) it uses the dedicated managed interfaces (`apcli0`/`apclii0`); on Qualcomm-based APs (U7 family) it uses AP interfaces that advertise the `SET_SCAN_DWELL` PHY capability. Both approaches perform off-channel scanning while maintaining client service.
 
@@ -124,8 +124,8 @@ cp config.minimal.yaml config.yaml
 Each site report provides the values you use as the basis for your UniFi WLAN and access point configuration:
 
 - **Environment**: the site-wide RF target corridor derived from the configured environment
-- **WLAN**: per-SSID profile checks that show which settings already match and which should be corrected
-- **Access Points**: neighbor RSSI, overlap or coverage issues, and per-radio recommendations for transmit power, roaming, and minimum RSSI
+- **WLAN**: per-SSID profile checks that show which settings already match and which should be corrected, including the Roaming Assistant target aggregated across the APs broadcasting that WLAN
+- **Access Points**: neighbor RSSI, overlap or coverage issues, and per-radio recommendations for transmit power and minimum RSSI
 - **Adjacency Groups**: group-level channel diagnostics — channel width budget (2.4 GHz: 60 MHz / 5 GHz: 320 MHz), spectral overlap between adjacent APs, and missing peer sightings
 
 Apply the relevant changes in UniFi Network, run the tool again, and use the updated output to iteratively converge on a better result.
@@ -230,7 +230,7 @@ Does not replace AP placement, channel planning, site surveys, capacity planning
 
 - Ubiquiti: [UniFi WiFi SSID and AP Settings Overview](https://help.ui.com/hc/en-us/articles/32065480092951-UniFi-WiFi-SSID-level-Settings-Overview)
 
-Internal engineering notes (vision, ADRs, findings) live in the private [unifiwifioptimizer-docs](https://github.com/jtauschl/unifiwifioptimizer-docs) companion repo.
+Internal engineering notes (vision, requirements, ADRs, findings) live in the private [unifiwifioptimizer-int](https://github.com/jtauschl/unifiwifioptimizer-int) companion repo.
 
 ## Contributing
 

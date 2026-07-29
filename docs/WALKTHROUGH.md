@@ -173,11 +173,10 @@ The script first shows the site-level RF parameters, then checks each WLAN again
 ```text
 Environment:               Residential
 Target RSSI @ Neighbor:    -73 dBm to -67 dBm
-Roaming Assistant:         -67 dBm
 Minimum RSSI:              -73 dBm
 ```
 
-These values are derived from `environment: Residential` and are the same for all APs on the site.
+These values are derived from `environment: Residential` and are the same for all APs on the site. Roaming Assistant is no longer a site-wide value here — since UniFi moved it from radio level to WLAN level, it's computed per WLAN (aggregated across the APs broadcasting that SSID) and shown in the per-WLAN profile check below, not in this site-level summary.
 
 ### Per-WLAN Profile Check
 
@@ -191,6 +190,7 @@ Profile    Throughput
   ✓ WiFi Band                        2.4 GHz, 5 GHz
   Roaming Assistance:
   ✓ Fast Roaming                     Enabled
+  ✓ Roaming Assistant                Enabled, -73 dBm
   Hi-Capacity Tuning:
   ✓ Minimum Data Rate Mode           Manual
   ✓ Minimum Data Rate 2.4 GHz        11 Mbps
@@ -253,11 +253,12 @@ AP5             -67 dBm
 
 Recommendations:
   ✗ Transmit Power           Custom, 19 dBm (reduce by 4 dBm)
-  ✓ Roaming Assistant        Enabled, -67 dBm
   ✓ Minimum RSSI             Disabled
 ```
 
 Here the average neighbor RSSI (−66 dBm) is above the corridor (−73 dBm to −67 dBm), so the script recommends reducing TX power by 4 dBm. If the average were already within the corridor, no change would be recommended regardless of the shift value.
+
+Roaming Assistant no longer appears in this per-AP recommendations block — see the "Per-WLAN Profile Check" example above, where it's now a per-WLAN compliance check (unless no WLAN on the site exposes the field, in which case the tool falls back to the previous per-AP behavior shown here, see `docs/ALGORITHM.md` §7).
 
 An outer AP hitting the hardware maximum:
 
@@ -276,7 +277,6 @@ AP5             -78 dBm *
 
 Recommendations:
   ✓ Transmit Power           Custom, 23 dBm
-  ✓ Roaming Assistant        Enabled, -67 dBm
   ✓ Minimum RSSI             Disabled
 ```
 

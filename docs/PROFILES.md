@@ -45,12 +45,14 @@ profiles:
     dtim_5: 3
     group_rekey: 3600
     ap_name_in_beacon: false
+    roaming_assistant: true
 ```
 
 ## Field Guide
 
 - `wifi_bands`: expected band availability
 - `fast_roaming`, `mlo`, `bss_transition`, `uapsd`: roaming and client behavior controls
+- `roaming_assistant`: whether Roaming Assistant / "Handoff Suggestions (802.11v)" should be enabled — a different mechanism from `fast_roaming` (802.11r) and `bss_transition` (802.11v protocol support itself); see `ALGORITHM.md` §7 "Enable/disable expectation". Only the on/off expectation is profile-driven — the RSSI threshold is always computed from the site's RF model, never from the profile.
 - `minrate_mode`, `minrate_*`: minimum data rate mode and per-band values
 - `dtim_mode`, `dtim_*`: DTIM mode and per-band DTIM values
 - `group_rekey`: group rekey interval, always checked
