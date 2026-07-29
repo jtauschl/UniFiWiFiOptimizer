@@ -12,14 +12,14 @@ WLAN profile checks provide supporting best-practice guidance alongside the RF c
 The script uses AP-to-AP neighbor RSSI as a proxy for cell overlap:
 
 - **TX Power** targets the center of a corridor derived from the RF environment
-- **Roaming Assistant** is per AP: default = `TX_LO + ROAM_OFFSET_DB`, capped against the weakest neighbor when that neighbor is below the target corridor, then clamped to `[ROAM_FLOOR, ROAM_CEILING]`
+- **Roaming Assistant** is per WLAN, aggregated (as a conservative minimum) across the APs broadcasting that SSID: each AP's own value is `TX_LO + ROAM_OFFSET_DB`, capped against its weakest SSID-relevant neighbor when that neighbor is below the target corridor, then clamped to `[ROAM_FLOOR, ROAM_CEILING]` (see §7; falls back to a per-AP recommendation on controllers without the newer WLAN-level API field)
 - **Minimum RSSI** is derived from the lower corridor bound (`TX_LO`) and can be enabled selectively
 
 The script implements this by comparing measured neighbor RSSI against a derived target corridor and converting the delta into per-radio recommendations.
 
 ## 2. Data Sources
 
-1. **UniFi API** — radio settings: channel, TX power, TX limits, TX mode, Minimum RSSI, Roaming Assistant
+1. **UniFi API** — radio settings: channel, TX power, TX limits, TX mode, Minimum RSSI; WLAN settings: Roaming Assistant (per SSID, see §7)
 2. **SSH** — AP-to-AP neighbor BSS scans on 2.4 and 5 GHz
 
 The script detects scan-capable interfaces automatically via `iface_can_scan()`: on MediaTek-based APs (U6 family) it uses the dedicated managed interfaces (`apcli0`/`apclii0`); on Qualcomm-based APs (U7 family) it uses AP interfaces that advertise the `SET_SCAN_DWELL` PHY capability. Only active bands are scanned. Target BSSIDs are derived from the AP base MAC via offsets `+1` and `+2`.
@@ -86,7 +86,7 @@ if delta_tx < 0 and |delta_tx| < 3:
 
 The asymmetry reflects the cost difference: insufficient TX power causes coverage gaps and dropped connections, while slightly excessive TX power only creates mild cell overlap. The reduction threshold of 3 dBm is chosen to exceed the typical `iw scan` measurement noise of ±2–3 dBm, so that a reduction is only recommended when the signal is genuinely above the corridor.
 
-Minimum RSSI is a fixed value — no hysteresis. Roaming Assistant is per AP (see §7) but does not use hysteresis either: the recommendation is computed from the latest scan, the same way `TX_LO` is derived.
+Minimum RSSI is a fixed value — no hysteresis. Roaming Assistant is per WLAN, aggregated across broadcasting APs (see §7), and does not use hysteresis either: the recommendation is computed from the latest scan, the same way `TX_LO` is derived.
 
 ### Coverage warnings
 
@@ -117,7 +117,7 @@ TX_HI = TX_LO + CORRIDOR_WIDTH
 | `ROAM_TARGET` | −67 dBm | Cisco VoWLAN cell-edge anchor for the path-loss model (not the per-AP threshold) |
 | `OVERLAP_DIST` | 60% | ~20% cell area overlap → 60% of AP-to-AP distance |
 | `CORRIDOR_WIDTH` | 6 dB | Symmetric tolerance around corridor center |
-| `ROAM_OFFSET_DB` | 0 | Per-AP Roaming Assistant offset relative to `TX_LO` (set to 9 to reproduce the legacy −67 dBm value at Obstructed) |
+| `ROAM_OFFSET_DB` | 0 | Roaming Assistant offset relative to `TX_LO`, applied per broadcasting AP before aggregation (set to 9 to reproduce the legacy −67 dBm value at Obstructed) |
 | `ROAM_MARGIN_DB` | 5 | Safety margin between weakest neighbor RSSI and the capped threshold |
 | `ROAM_FLOOR` | −78 dBm | Stability floor — below this, Roaming Assistant becomes pointless |
 | `ROAM_CEILING` | −67 dBm | Hard ceiling for the Roaming Assistant recommendation |
@@ -158,19 +158,33 @@ For the default environment presets (`Open`, `Residential`, `Office`, `Obstructe
 
 The recommendation is always derived, but whether you enable it is a deployment choice. It is most useful when cells are planned, overlap exists, and sticky clients need to be reduced.
 
-### Why WLAN profiles do not influence Roaming Assistant or Minimum RSSI
+### Why WLAN profiles do not influence the Roaming Assistant threshold or Minimum RSSI
 
-The shipped WLAN profiles (Standard, IoT, Hotspot, Throughput, Latency) control SSID-level settings: authentication, DTIM, UAPSD, fast-roaming toggle, minimum data rate, multicast handling. Roaming Assistant and Minimum RSSI are radio-level settings — one value per radio, regardless of how many SSIDs the radio carries. Because a single radio typically serves SSIDs from multiple profiles at the same time, a per-profile Roaming/Min-RSSI value cannot be applied cleanly. The decision stays explicit (via `ROAM_OFFSET_DB`) instead of being inferred from profile assignments.
+The shipped WLAN profiles (Standard, IoT, Hotspot, Throughput, Latency) control SSID-level settings: authentication, DTIM, UAPSD, fast-roaming toggle, minimum data rate, multicast handling. Minimum RSSI is a radio-level setting — one value per radio, regardless of how many SSIDs the radio carries. Roaming Assistant *was* radio-level too, but UniFi moved it to SSID level (see §7) — even so, its target **threshold** stays a computed RF-model value, not a profile-driven one: the aggregation in §7 uses the same site-aware corridor as every other recommendation here, so a per-profile Roaming value still cannot be inferred cleanly from profile assignments alone. The decision stays explicit (via `ROAM_OFFSET_DB`) instead of being tied to a profile.
 
 ## 7. Roaming Assistant
 
-Recommended only on 5 GHz. The threshold is computed per AP from `TX_LO` and the weakest neighbor RSSI:
+> **Terminology note:** since UniFi Network Application 10.4.57, the controller UI labels this setting "Handoff Suggestions (802.11v)" instead of "Roaming Assistant". The underlying API field name (`roaming_assistant_na_*`) and this tool's terminology are unchanged — "Roaming Assistant" is used throughout this document and the tool's output. Release notes for that version also advertise expanded 6 GHz support, but a live-verified WLAN with 6 GHz disabled returned only the `_na` (5 GHz) field — whether a `_6e` counterpart exists once 6 GHz is enabled is unconfirmed (out of scope for 6 GHz handling here; see [UWO-13](https://op.nutrilytics.de/projects/unifi-wifi-optimizer) for 6 GHz band support in general).
+
+### Data source and site scope
+
+Confirmed against a live controller (Network Application with AP firmware 6.7.54 and 8.7.11): Roaming Assistant is no longer exposed per radio — the `assisted_roaming_enabled`/`assisted_roaming_rssi` fields on `radio_table` are absent from the API. The setting now lives on the WLAN (`roaming_assistant_na_enabled`/`roaming_assistant_na_rssi` in `wlanconf`), which changes the model from "one value per radio" to "one value per SSID, broadcast across a subset of a site's APs" (`ap_group_mode`: `all`, `group`, or `specific` — all three resolve uniformly through the same AP-group membership). The controller UI rename to "Handoff Suggestions (802.11v)" is documented as happening in Network Application 10.4.57 (see the terminology note above); the exact version where the underlying API field moved from radio to WLAN level is **not** confirmed to be the same release — only the current (post-10.4.57) state was verified live. The tool's site-wide fallback to the per-radio path (below) exists precisely because the version boundary is unknown.
+
+The optimizer reports Roaming Assistant as a **compliance check** next to Fast Roaming, using a target value computed the same way as before, but aggregated over the APs that actually broadcast each WLAN:
+
+```text
+SSID_peers(AP) = RF_neighbors(AP) ∩ broadcasting_APs(WLAN)
+```
+
+Only RF neighbors configured in `config.yaml` that also broadcast the same WLAN count toward that AP's threshold — a configured neighbor that doesn't carry the SSID is not a real handoff target and must not limit the value.
+
+For each broadcasting AP with a non-empty `SSID_peers` set, the threshold is computed exactly as before (weakest sighting among its SSID peers, direction identical to the TX/coverage calculation — the AP's own signal as seen at the peer, not the reverse, since RSSI is not symmetric):
 
 ```text
 default = TX_LO + ROAM_OFFSET_DB
 
-if min(neighbor_rssi) < TX_LO:                # weakest neighbor below corridor
-    cap = min(neighbor_rssi) - ROAM_MARGIN_DB
+if min(SSID_peer_rssi) < TX_LO:                # weakest SSID peer below corridor
+    cap = min(SSID_peer_rssi) - ROAM_MARGIN_DB
     threshold = min(default, cap)
 else:
     threshold = default
@@ -178,20 +192,34 @@ else:
 threshold = clamp(threshold, ROAM_FLOOR, ROAM_CEILING)
 ```
 
+The WLAN's target is the **minimum** across all its broadcasting APs' thresholds — conservative, so no AP is judged more optimistically than its own coverage situation allows. Every AP whose own value equals that minimum is a **limiting AP** for the WLAN; if several APs tie (common after a `ROAM_FLOOR` clamp), all of them are reported, not just one.
+
 `ROAM_OFFSET_DB=0` keeps the threshold at the lower corridor edge, which matches the published roaming triggers of common clients (Apple iPhone/iPad ~−70 dBm, Mac ~−75 dBm; Aruba ClientMatch sticky-min default −70 dBm). The legacy fixed value of −67 dBm can be reproduced by setting `ROAM_OFFSET_DB=9` at Obstructed.
 
-The cap only triggers when the weakest neighbor is below `TX_LO`. APs whose worst neighbor is still inside the corridor keep the default — measurement noise around `TX_LO` does not pull the threshold down.
+### Coverage warnings
 
-When the cap engages, the AP report shows one of two warnings depending on which mechanism set the final value:
+When a cap engages for a limiting AP, the report shows one of two warnings, naming both the limiting AP and the weakest SSID peer that caused the cap:
 
-- **`Roaming Assistant lowered to X dBm`** — the weakest neighbor is below `TX_LO`, so `min(neighbor) − ROAM_MARGIN_DB` is used (and is still above `ROAM_FLOOR`). The threshold tracks coverage but stays in usable territory.
-- **`Roaming Assistant clamped to ROAM_FLOOR (X dBm)`** — `min(neighbor) − ROAM_MARGIN_DB` would fall below `ROAM_FLOOR` and is clamped. This is a stability floor, not a quality target: it prevents aggressive BTM requests at APs that have no reachable roaming neighbor, but it does not fix the underlying coverage problem.
+- **`Roaming Assistant lowered to X dBm`** — the weakest SSID peer is below `TX_LO`, so `min(peer) − ROAM_MARGIN_DB` is used (and is still above `ROAM_FLOOR`). The threshold tracks coverage but stays in usable territory.
+- **`Roaming Assistant clamped to ROAM_FLOOR (X dBm)`** — `min(peer) − ROAM_MARGIN_DB` would fall below `ROAM_FLOOR` and is clamped. This is a stability floor, not a quality target: it prevents aggressive BTM requests at APs that have no reachable roaming neighbor, but it does not fix the underlying coverage problem.
 
 The Roaming Assistant sends an 802.11v BSS Transition Management (BTM) request when a client's signal drops to the threshold. BTM is advisory — the client may ignore it.
 
+### Applicability and incomplete data
+
+- **Band applicability** is decided from the WLAN's *actual* configured bands, never its profile's expected bands — a WLAN that deviates from its profile on band is already flagged separately by the "WiFi Band" check, so this avoids reporting the same deviation twice. A WLAN not broadcasting 5 GHz is reported `N/A`.
+- **Single-AP WLANs** (only one AP broadcasts the SSID) have no handoff target and are reported `N/A`.
+- **Incomplete data never produces a silently optimistic value.** If a broadcasting AP has no configured RF neighbor that also broadcasts the WLAN, or a relevant peer's sighting is missing from the current scan, the WLAN is reported `Incomplete` with the specific reason (naming the AP and, where relevant, the missing peer) instead of a ✓/✗ verdict computed from a partial data set.
+
+### Fallback for older controllers
+
+If no WLAN on a site exposes `roaming_assistant_na_*` at all (an older Network Application/API version), the tool falls back — for that entire site — to the previous per-radio behavior: Roaming Assistant appears as a per-AP recommendation in the 5 GHz RF-tuning section, computed the same way but from the full RF-neighbor set rather than an SSID-filtered one. The fallback is site-wide, not per WLAN, since mixing the two aggregation models within one site would compare incompatible targets.
+
+This only matters on sites still running an older Network Application/API version; once the controller exposes `roaming_assistant_na_*`, the per-WLAN model takes over automatically.
+
 | Recommendation | Value | Enabled by default? |
 |----------------|-------|---------------------|
-| Roaming Assistant | per AP, default `TX_LO + ROAM_OFFSET_DB`, clamped to `[ROAM_FLOOR, ROAM_CEILING]` | Yes (5 GHz only) |
+| Roaming Assistant threshold | per WLAN, `min()` over broadcasting APs' `TX_LO + ROAM_OFFSET_DB`, clamped to `[ROAM_FLOOR, ROAM_CEILING]` (per-AP fallback on older controllers) | Yes (5 GHz only) |
 | Minimum RSSI | `TX_LO` | Use selectively |
 
 WLAN profiles do not influence this recommendation; see §6 for the rationale.

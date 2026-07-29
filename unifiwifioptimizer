@@ -422,6 +422,11 @@ site_radio_tsv_path() {
   printf "%s/%s.radios.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+site_apgroups_tsv_path() {
+  local site=$1
+  printf "%s/%s.apgroups.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
 site_ssh_credentials() {
   local site=$1 creds
   creds=$(awk -F '\t' -v site="$site" '$1 == site { print $4 "\t" $5; exit }' "$SITES_FILE")
@@ -542,6 +547,10 @@ try:
             wlan.get('dtim_6e', ''),
             wlan.get('group_rekey', ''),
             wlan.get('advertise_device_name_in_beacon', ''),
+            wlan.get('roaming_assistant_na_enabled', ''),
+            wlan.get('roaming_assistant_na_rssi', ''),
+            wlan.get('ap_group_mode', ''),
+            '|'.join(wlan.get('ap_group_ids', []) or []),
         ]
         print(sep.join(str(field).replace(sep, ' ') for field in fields))
 except Exception:
@@ -550,6 +559,50 @@ PY
   then
     print_api_unavailable_note
     return 1
+  fi
+}
+
+fetch_site_apgroups() {
+  local site=$1
+  local raw_file
+
+  raw_file="${tmpdir}/$(sanitize_token "$site").apgroups.json"
+
+  # Unlike the other fetch_* helpers, a failure here must NOT abort the run:
+  # this v2 endpoint is only relevant to the new WLAN-level Roaming
+  # Assistant path, and older controllers (the exact case the site-wide
+  # fallback in prepare_site_roaming_checks() exists for) may not have it at
+  # all. Under set -e, an unguarded call would kill the whole script before
+  # the fallback decision ever gets made.
+  if ! fetch_api_json "/proxy/network/v2/api/site/${site}/apgroups" "$raw_file"; then
+    : >"$(site_apgroups_tsv_path "$site")"
+    return 0
+  fi
+
+  if ! python3 - "$raw_file" <<'PY' >"$(site_apgroups_tsv_path "$site")" 2>/dev/null; then
+import sys, json
+
+apgroups_path = sys.argv[1]
+
+try:
+    with open(apgroups_path, 'r', encoding='utf-8') as handle:
+        groups = json.load(handle)
+    sep = '\x1f'
+    for group in groups:
+        fields = [
+            group.get('_id', ''),
+            '|'.join(group.get('device_macs', []) or []),
+        ]
+        print(sep.join(str(field).replace(sep, ' ') for field in fields))
+except Exception:
+    sys.exit(1)
+PY
+    # Same tolerance as the curl failure above: a malformed/unexpected
+    # response (schema drift, non-JSON body, etc.) must not abort the run
+    # either -- treated the same as "endpoint not available".
+    print_api_unavailable_note
+    : >"$(site_apgroups_tsv_path "$site")"
+    return 0
   fi
 }
 
@@ -590,6 +643,7 @@ build_site_inventory() {
     [[ -z "$site" ]] && continue
     fetch_site_devices "$site"
     fetch_site_wlan_info "$site"
+    fetch_site_apgroups "$site"
 
     python3 - "$site" "$NEIGHBORS_FILE" "$WLANS_FILE" "$(site_devices_json_path "$site")" "$(site_wlans_tsv_path "$site")" "$(site_radio_tsv_path "$site")" >> "$APS_FILE" <<'PY'
 import json
@@ -1688,6 +1742,319 @@ calculate_roaming_recommendation() {
   _result=$capped
 }
 
+roaming_wlan_tsv_path() {
+  local site=$1
+  printf "%s/%s.roaming_wlan.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+roaming_detail_tsv_path() {
+  local site=$1
+  printf "%s/%s.roaming_detail.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+# Marker file: exists iff at least one WLAN on the site exposed
+# roaming_assistant_na_* in wlanconf, regardless of whether it was 5 GHz or
+# actually evaluable. This is distinct from roaming_wlan_tsv_path() being
+# non-empty -- a site with only 2.4-GHz-only WLANs can have the new API
+# field present on every WLAN and still produce zero aggregation rows (band
+# not applicable), which must NOT be confused with "field absent, fall back
+# to the legacy per-radio path".
+roaming_field_present_flag_path() {
+  local site=$1
+  printf "%s/%s.roaming_field_present.flag\n" "$tmpdir" "$(sanitize_token "$site")"
+}
+
+# Per-site, per-WLAN Roaming Assistant aggregation (ALGORITHM.md §7).
+# Must run inside the site loop, after TX_LO/TX_HI are set for this site
+# (calculate_roaming_recommendation() depends on the site-specific TX_LO).
+#
+# For each WLAN broadcasting on 5 GHz, aggregates the per-AP corridor-based
+# threshold over the APs that actually broadcast that SSID, restricted to
+# each AP's configured RF neighbors that also broadcast the same SSID
+# (SSID_peers(AP) = RF_neighbors(AP) ∩ broadcasting_APs(WLAN)). Writes:
+#   roaming_wlan.tsv:   wlan_name, aggregated_rssi, completeness, incomplete_reasons
+#   roaming_detail.tsv: wlan_name, limiting_ap, weakest_peer, weakest_peer_rssi, raw_cap, warning_status
+#     (one row per limiting AP; 0 rows when no cap engaged or not evaluable)
+prepare_site_roaming_checks() {
+  local site=$1
+
+  : >"$(roaming_wlan_tsv_path "$site")"
+  : >"$(roaming_detail_tsv_path "$site")"
+  rm -f "$(roaming_field_present_flag_path "$site")"
+
+  # API-model detection: does ANY WLAN on this site (per the full API
+  # response, not config.yaml's mapping) expose roaming_assistant_na_*?
+  # Deliberately a separate, unconditional first pass over
+  # site_wlans_tsv_path() (all WLANs the controller returned) -- not the
+  # config.yaml-mapped $WLANS_FILE, and not gated on AP-group data being
+  # available. Gating this on the mapping, band applicability, or AP-group
+  # resolution succeeding would misdetect an older-API controller as current
+  # (or vice versa) whenever a site has partial mappings, 2.4-GHz-only
+  # WLANs, or the apgroups fetch failed -- reintroducing the UWO-15 bug this
+  # feature exists to fix.
+  if [[ -s "$(site_wlans_tsv_path "$site")" ]]; then
+    local _detect_row _detect_na_enabled _detect_na_rssi
+    while IFS="$WLAN_FIELD_SEP" read -r \
+      _dn _de _dbt _dfr _dmm _d24e _d24 _d5e _d5 _dbc _dme _dpa \
+      _dwb _dwbs _dmlo _dsec _dwm _dw3s _dw3t _dpmf _dhs _dl2 \
+      _dsac _dss _duap _ddm _dd24 _dd5 _dd6 _dgr _dabb \
+      _detect_na_enabled _detect_na_rssi _dgm _dgi; do
+      if [[ -n "$_detect_na_enabled" || -n "$_detect_na_rssi" ]]; then
+        : >>"$(roaming_field_present_flag_path "$site")"
+        break
+      fi
+    done <"$(site_wlans_tsv_path "$site")"
+  fi
+
+  [[ -s "$(site_wlans_tsv_path "$site")" ]] || return 0
+
+  # NOTE: deliberately no early return when site_apgroups_tsv_path() is
+  # empty (e.g. fetch_site_apgroups() failed or the endpoint returned no
+  # groups). A field-bearing WLAN must still get a roaming_wlan.tsv row --
+  # "not_evaluable", via the empty-macs_field branch below -- instead of
+  # silently having no row at all. No row here reads downstream
+  # (print_general_check_roaming_assistant()) as "older API", which would
+  # be wrong: the presence flag above already correctly recorded that the
+  # field WAS seen, so the WLAN must show as unevaluable, not N/A.
+
+  local wlan_row wlan_name ap_group_ids_field
+
+  while IFS=$'\t' read -r current_site wlan_name profile_name; do
+    [[ "$current_site" != "$site" ]] && continue
+
+    wlan_row=$(get_site_wlan_row "$site" "$wlan_name")
+    [[ -z "$wlan_row" ]] && continue
+
+    IFS="$WLAN_FIELD_SEP" read -r \
+      _name _enabled _bss_transition _fast_roaming \
+      _minrate_mode \
+      _minrate24_en _minrate24 _minrate5_en _minrate5 \
+      _bc_filter _mcast_enhance _proxy_arp \
+      wlan_band wlan_bands _mlo _security _wpa_mode _wpa3_support _wpa3_transition _pmf \
+      _hide_ssid _l2_isolation _sae_anti_clogging _sae_sync _uapsd \
+      _dtim_mode \
+      _dtim24 _dtim5 _dtim6 _group_rekey _ap_name_in_beacon \
+      na_enabled na_rssi _group_mode ap_group_ids_field <<<"$wlan_row"
+
+    # A WLAN without the new SSID-level field (older controller/API) cannot
+    # be evaluated on this path -- the site-wide fallback decision itself
+    # is already made above, from the full API response.
+    if [[ -z "$na_enabled" && -z "$na_rssi" ]]; then
+      continue
+    fi
+
+    # Band applicability uses the *actual* controller configuration, not the
+    # profile's expected bands (see print_general_check_roaming_assistant()).
+    if ! wifi_band_includes "$(normalize_wifi_bands "$wlan_band" "$wlan_bands")" "5g"; then
+      continue
+    fi
+
+    # Resolve broadcasting APs for this WLAN: ap_group_ids -> device_macs -> AP names.
+    # A device_mac may belong to an AP that isn't configured under
+    # neighbors: in config.yaml (so it's absent from APS_FILE) -- such an AP
+    # still broadcasts the SSID and must not silently vanish from the
+    # aggregation. site_devices_json_path() holds the full, unfiltered
+    # stat/device response for the site (the same source build_site_inventory()
+    # filters down into APS_FILE), so it's used here as a fallback name lookup.
+    # broadcasting_aps/unresolved_macs are treated as sets, not lists:
+    # ap_group_ids can reference multiple groups whose device_macs overlap
+    # (e.g. a WLAN referencing both "All APs" and a more specific group that
+    # is a subset of it), and deduping only at the end would let a single
+    # physical AP masquerade as several -- turning a real single-AP WLAN
+    # into an apparent multi-AP one, or skewing the min() aggregation with a
+    # duplicated value. An ap_group_id with no matching row in
+    # site_apgroups_tsv_path() (unknown/unresolvable group) previously
+    # vanished silently; it's now recorded as its own incomplete reason.
+    # Bash 3.2 (macOS system bash) has no associative arrays, so "seen"
+    # tracking uses a plain delimited string and glob matching instead --
+    # MACs and AP names never contain spaces, so this is safe.
+    local _seen_ap=" " _seen_mac=" "
+    local broadcasting_aps=() unresolved_macs=() unresolved_group_ids=()
+    local gid mac ap_name
+    for gid in ${ap_group_ids_field//|/ }; do
+      local macs_field
+      macs_field=$(awk -F "$WLAN_FIELD_SEP" -v id="$gid" '$1 == id { print $2; exit }' "$(site_apgroups_tsv_path "$site")")
+      if [[ -z "$macs_field" ]]; then
+        unresolved_group_ids+=("$gid")
+        continue
+      fi
+      for mac in ${macs_field//|/ }; do
+        [[ "$_seen_mac" == *" ${mac} "* ]] && continue
+        _seen_mac+="${mac} "
+        ap_name=$(awk -F '\t' -v site="$site" -v mac="$mac" '$1 == site && $3 == mac { print $2; exit }' "$APS_FILE")
+        if [[ -z "$ap_name" ]]; then
+          ap_name=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as fh:
+        data = json.load(fh).get('data', [])
+    for dev in data:
+        if dev.get('type') == 'uap' and dev.get('mac') == sys.argv[2]:
+            print(dev.get('name', ''))
+            break
+except Exception:
+    pass
+" "$(site_devices_json_path "$site")" "$mac" 2>/dev/null)
+        fi
+        if [[ -n "$ap_name" ]]; then
+          if [[ "$_seen_ap" != *" ${ap_name} "* ]]; then
+            _seen_ap+="${ap_name} "
+            broadcasting_aps+=("$ap_name")
+          fi
+        else
+          unresolved_macs+=("$mac")
+        fi
+      done
+    done
+
+    if ((${#broadcasting_aps[@]} == 0)); then
+      local _zero_reason="no broadcasting APs resolved from ap_group_ids"
+      if ((${#unresolved_group_ids[@]} > 0)); then
+        local _zero_ids
+        _zero_ids=$(
+          IFS=','
+          echo "${unresolved_group_ids[*]}"
+        )
+        _zero_reason="no broadcasting APs resolved -- unresolvable AP group(s): ${_zero_ids}"
+      fi
+      printf '%s%s%snot_evaluable%s%s\n' "$wlan_name" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" "$_zero_reason" \
+        >>"$(roaming_wlan_tsv_path "$site")"
+      continue
+    fi
+
+    if ((${#broadcasting_aps[@]} == 1 && ${#unresolved_macs[@]} == 0 && ${#unresolved_group_ids[@]} == 0)); then
+      printf '%s%s%sna%sno handoff target -- only one AP broadcasts this SSID\n' "$wlan_name" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" \
+        >>"$(roaming_wlan_tsv_path "$site")"
+      continue
+    fi
+
+    # Per broadcasting AP: SSID-filtered peer set, weakest sighting, corridor calc.
+    # incomplete_reasons is seeded with any broadcasting AP that couldn't be
+    # matched to config.yaml's neighbors: (or resolved to a name at all) --
+    # a broadcasting AP outside local RF config is not silently dropped, since
+    # the WLAN target can't be trusted as complete without it.
+    local ap incomplete_reasons=() ap_values=() ap_value_names=()
+    if ((${#unresolved_group_ids[@]} > 0)); then
+      local ugid
+      for ugid in "${unresolved_group_ids[@]}"; do
+        incomplete_reasons+=("AP group ${ugid} referenced by this WLAN could not be resolved")
+      done
+    fi
+    if ((${#unresolved_macs[@]} > 0)); then
+      local umac
+      for umac in "${unresolved_macs[@]}"; do
+        incomplete_reasons+=("broadcasting AP with MAC ${umac} is not configured under neighbors: in config.yaml")
+      done
+    fi
+    for ap in "${broadcasting_aps[@]}"; do
+      local rf_neighbors ssid_peers=() peer
+      rf_neighbors=$(get_peers "$site" "$ap")
+      for peer in $rf_neighbors; do
+        local is_broadcasting=false bcap
+        for bcap in "${broadcasting_aps[@]}"; do
+          [[ "$bcap" == "$peer" ]] && is_broadcasting=true && break
+        done
+        [[ "$is_broadcasting" == "true" ]] && ssid_peers+=("$peer")
+      done
+
+      if ((${#ssid_peers[@]} == 0)); then
+        incomplete_reasons+=("${ap} has no configured RF neighbor broadcasting this SSID")
+        continue
+      fi
+
+      # Direction matches analyze_band(): RSSI of *this AP* as seen in the
+      # *peer's* scan cache (ALGORITHM.md §3, "RSSI @ Neighbor"). RSSI is not
+      # symmetric, so this direction is deliberate, not incidental.
+      local ap_mac ap_mac5g min_peer_rssi="" min_peer_name=""
+      ap_mac=$(get_ap_mac "$site" "$ap")
+      [[ -z "$ap_mac" ]] && continue
+      ap_mac5g=$(mac_with_offset "$ap_mac" 2)
+
+      local missing_peers=()
+      for peer in "${ssid_peers[@]}"; do
+        local peer_prefix peer_cache rssi_to
+        peer_prefix=$(ap_scan_prefix "$site" "$peer")
+        peer_cache=$(scan_rssi_cache_path "${peer_prefix}.5g")
+        rssi_to=$(get_rssi "$ap_mac5g" "$peer_cache")
+        if [[ -z "$rssi_to" ]]; then
+          missing_peers+=("$peer")
+          continue
+        fi
+        if [[ -z "$min_peer_rssi" ]] || ((rssi_to < min_peer_rssi)); then
+          min_peer_rssi=$rssi_to
+          min_peer_name=$peer
+        fi
+      done
+
+      # Any missing sighting among this AP's SSID-relevant peers makes the
+      # AP's value unreliable, even if other peers were sighted -- a partial
+      # data set must not silently produce a value as if it were complete.
+      if ((${#missing_peers[@]} > 0)); then
+        local missing_peer
+        for missing_peer in "${missing_peers[@]}"; do
+          incomplete_reasons+=("${ap}: neighbor ${missing_peer} not sighted")
+        done
+        continue
+      fi
+
+      calculate_roaming_recommendation "$min_peer_rssi"
+      ap_values+=("$_result")
+      ap_value_names+=("${ap}|${min_peer_name}|${min_peer_rssi}|${_roam_raw_cap}|${_roam_warn}")
+    done
+
+    if ((${#ap_values[@]} == 0)); then
+      local reason
+      reason=$(
+        IFS='|'
+        echo "${incomplete_reasons[*]}"
+      )
+      printf '%s%s%snot_evaluable%s%s\n' "$wlan_name" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" "$WLAN_FIELD_SEP" "$reason" >>"$(roaming_wlan_tsv_path "$site")"
+      continue
+    fi
+
+    # Aggregate WLAN target as min() over complete per-AP values (conservative).
+    local wlan_min=""
+    local v
+    for v in "${ap_values[@]}"; do
+      if [[ -z "$wlan_min" ]] || ((v < wlan_min)); then
+        wlan_min=$v
+      fi
+    done
+
+    local completeness="ok"
+    if ((${#incomplete_reasons[@]} > 0)); then
+      completeness="incomplete"
+    fi
+
+    local reasons_joined=""
+    if ((${#incomplete_reasons[@]} > 0)); then
+      reasons_joined=$(
+        IFS='|'
+        echo "${incomplete_reasons[*]}"
+      )
+    fi
+
+    printf '%s%s%s%s%s%s%s\n' "$wlan_name" "$WLAN_FIELD_SEP" "$wlan_min" "$WLAN_FIELD_SEP" "$completeness" "$WLAN_FIELD_SEP" "$reasons_joined" \
+      >>"$(roaming_wlan_tsv_path "$site")"
+
+    # Every AP whose own value equals the WLAN-wide min() is a limiting AP
+    # (ties are all reported, sorted by name for deterministic output).
+    local idx entry_ap entry_peer entry_peer_rssi entry_raw_cap entry_warn
+    local -a limiting_rows=()
+    for idx in "${!ap_value_names[@]}"; do
+      if ((ap_values[idx] == wlan_min)); then
+        IFS='|' read -r entry_ap entry_peer entry_peer_rssi entry_raw_cap entry_warn <<<"${ap_value_names[$idx]}"
+        limiting_rows+=("${entry_ap}"$'\t'"${entry_peer}"$'\t'"${entry_peer_rssi}"$'\t'"${entry_raw_cap}"$'\t'"${entry_warn}")
+      fi
+    done
+    printf '%s\n' "${limiting_rows[@]}" | sort | while IFS=$'\t' read -r entry_ap entry_peer entry_peer_rssi entry_raw_cap entry_warn; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$wlan_name" "$entry_ap" "$entry_peer" "$entry_peer_rssi" "$entry_raw_cap" "$entry_warn" \
+        >>"$(roaming_detail_tsv_path "$site")"
+    done
+  done <"$WLANS_FILE"
+}
+
 # ============================================================================
 # Output Functions
 # ============================================================================
@@ -2111,6 +2478,73 @@ print_general_check_missing() {
   printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$expected"
 }
 
+# Roaming Assistant compliance check (ALGORITHM.md §7). Compares the WLAN's
+# actual roaming_assistant_na_* value against the site-aware target computed
+# by prepare_site_roaming_checks() and cached in roaming_wlan.tsv/
+# roaming_detail.tsv. Band applicability is decided from actual_wifi_bands
+# (the real controller config), never from the profile's expected bands --
+# a WLAN that deviates from its profile on band already gets flagged by the
+# separate "WiFi Band" check, so this avoids reporting the same deviation twice.
+print_general_check_roaming_assistant() {
+  local site=$1 wlan_name=$2 na_enabled=$3 na_rssi=$4 actual_wifi_bands=$5
+  local label="Roaming Assistant"
+
+  if ! wifi_band_includes "$actual_wifi_bands" "5g"; then
+    printf "  %-${GENERAL_LABEL_WIDTH}s %s\n" "$label" "N/A (5 GHz not broadcast)"
+    return
+  fi
+
+  local wlan_row
+  wlan_row=$(awk -F "$WLAN_FIELD_SEP" -v w="$wlan_name" '$1 == w { print; exit }' "$(roaming_wlan_tsv_path "$site")")
+
+  if [[ -z "$wlan_row" ]]; then
+    printf "  %-${GENERAL_LABEL_WIDTH}s %s\n" "$label" "N/A (older API without roaming_assistant_na_*)"
+    return
+  fi
+
+  local _w aggregated_rssi completeness incomplete_reasons
+  IFS="$WLAN_FIELD_SEP" read -r _w aggregated_rssi completeness incomplete_reasons <<<"$wlan_row"
+
+  if [[ "$completeness" == "na" ]]; then
+    printf "  %-${GENERAL_LABEL_WIDTH}s %s\n" "$label" "$incomplete_reasons"
+    return
+  fi
+
+  if [[ "$completeness" == "not_evaluable" ]]; then
+    printf "  ${YELLOW}  ? %-${GENERAL_LABEL_WIDTH}s Not evaluable: %s${RESET}\n" "$label" "$incomplete_reasons"
+    return
+  fi
+
+  if [[ "$completeness" == "incomplete" ]]; then
+    printf "  ${YELLOW}  ? %-${GENERAL_LABEL_WIDTH}s Incomplete: %s${RESET}\n" "$label" "$incomplete_reasons"
+    return
+  fi
+
+  if ! is_true "$na_enabled" || (( na_rssi != aggregated_rssi )); then
+    flag_change
+    printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s Enabled, %s dBm${RESET}\n" "$label" "$aggregated_rssi"
+  else
+    printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s Enabled, %s dBm${RESET}\n" "$label" "$na_rssi"
+  fi
+
+  local _w limiting_ap weakest_peer weakest_peer_rssi raw_cap warn_status
+  while IFS=$'\t' read -r _w limiting_ap weakest_peer weakest_peer_rssi raw_cap warn_status; do
+    [[ -z "$limiting_ap" ]] && continue
+    case "$warn_status" in
+      capped_by_margin)
+        printf "\n  ${YELLOW}* Roaming Assistant lowered to %s dBm: weakest neighbor of %s is %s (%s dBm), below TX_LO (%d dBm).${RESET}\n" \
+          "$aggregated_rssi" "$limiting_ap" "$weakest_peer" "$weakest_peer_rssi" "$TX_LO"
+        printf '  %s  Coverage-limited recommendation — consider repositioning %s or adding a neighbor AP.%s\n' "$YELLOW" "$limiting_ap" "$RESET"
+        ;;
+      capped_by_floor)
+        printf "\n  ${YELLOW}* Roaming Assistant clamped to ROAM_FLOOR (%s dBm) for %s: weakest neighbor %s (%s dBm) would yield %s dBm.${RESET}\n" \
+          "$aggregated_rssi" "$limiting_ap" "$weakest_peer" "$weakest_peer_rssi" "$raw_cap"
+        printf '  %s  No reachable roaming neighbor at this AP — consider repositioning %s or adding a neighbor AP.%s\n' "$YELLOW" "$limiting_ap" "$RESET"
+        ;;
+    esac
+  done < <(awk -F '\t' -v w="$wlan_name" '$1 == w { print }' "$(roaming_detail_tsv_path "$site")")
+}
+
 print_general_checks() {
   local site=$1
   local matched=false
@@ -2122,6 +2556,7 @@ print_general_checks() {
   local wlan_band wlan_bands mlo security wpa_mode wpa3_support wpa3_transition pmf
   local hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd
   local dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon
+  local roaming_assistant_na_enabled roaming_assistant_na_rssi
   local profile expected_wifi_bands expected_mlo expected_fast_roaming expected_minrate_mode expected_minrate24 expected_minrate5
   local expected_bc_filter expected_mcast_enhance expected_proxy_arp
   local expected_security_protocols expected_pmf expected_hide_wifi_name
@@ -2155,7 +2590,8 @@ print_general_checks() {
       wlan_band wlan_bands mlo security wpa_mode wpa3_support wpa3_transition pmf \
       hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd \
       dtim_mode \
-      dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon <<< "$actual_row"
+      dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon \
+      roaming_assistant_na_enabled roaming_assistant_na_rssi _ap_group_mode _ap_group_ids <<< "$actual_row"
 
     if ! is_true "$enabled"; then
       print_general_check_missing "WLAN Enabled" "Enabled"
@@ -2188,6 +2624,7 @@ print_general_checks() {
     echo
     print_general_group_header "  Roaming Assistance:"
     print_general_check_bool "Fast Roaming" "$expected_fast_roaming" "$fast_roaming"
+    print_general_check_roaming_assistant "$site" "$wlan_name" "$roaming_assistant_na_enabled" "$roaming_assistant_na_rssi" "$actual_wifi_bands"
 
     echo
     print_general_group_header "  Hi-Capacity Tuning:"
@@ -2926,6 +3363,10 @@ while IFS=$'\t' read -r site n env_label _ssh_user _ssh_password; do
   printf "  %-26s %d dBm\n"            "Minimum RSSI:"          "$TX_LO"
   echo
 
+  prepare_site_roaming_checks "$site"
+  roaming_use_wlan_level=false
+  [[ -f "$(roaming_field_present_flag_path "$site")" ]] && roaming_use_wlan_level=true
+
   print_general_checks "$site"
 
   while IFS=$'\t' read -r current_site ap mac ip model; do
@@ -2980,9 +3421,12 @@ while IFS=$'\t' read -r site n env_label _ssh_user _ssh_password; do
 
     echo
 
+    include_roaming=true
+    [[ "$roaming_use_wlan_level" == "true" ]] && include_roaming=false
+
     analyze_band "5" "5g" "$scan_prefix" "$mac5g" "$cht5" "$ch5" "$tx5" \
       "$min_tx5" "$max_tx5" "$txmode5" "$min_rssi5" "$min_rssi_en5" "$ib5" \
-      "$dfs5" "$cac5_state" "true" "$has_radio5_api"
+      "$dfs5" "$cac5_state" "$include_roaming" "$has_radio5_api"
 
     echo
   done < "$APS_FILE"
