@@ -1,5 +1,7 @@
+# OS cruft
 .DS_Store
-.claude/
+Thumbs.db
+Desktop.ini
 
 # Credentials - never commit
 config.yaml
@@ -7,8 +9,8 @@ config.yaml
 # Design source files (keep locally, not useful in repo)
 *.psd
 
-# Local IDE and AI agent context files - stay on this machine only
-.vscode/
-.mcp.json
-AGENTS.md
+# Local scratch (umbrella level, never in this repo)
+HANDOFF.md
+PLANTREE.md
+
 .local/

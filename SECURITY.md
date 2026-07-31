@@ -1,0 +1,37 @@
+# Security Policy
+
+## Supported versions
+
+Only the latest tagged release is supported. Fixes ship as part of the next
+tagged release rather than as a backport to an older one.
+
+## Reporting a vulnerability
+
+Report a suspected vulnerability by emailing **juergen.tauschl@gmail.com**.
+
+**Do not open a public GitHub issue for a suspected vulnerability.**
+
+Include in your report:
+- The affected file, function, or command-line flag.
+- The release tag or commit you found it against.
+- The impact — what a UniFi operator running this tool would actually get wrong or exposed to.
+- Steps to reproduce, or reasoning if reproduction requires specific hardware/firmware.
+
+Expect an acknowledgment within 5 business days.
+
+## Scope and threat model
+
+`unifiwifioptimizer` is a read-only diagnostic tool. It:
+
+- Reads UniFi Network API configuration and neighbor scan data.
+- Runs `ssh` and `iw scan` on managed access points to collect neighbor RSSI.
+- **Never writes back** to the UniFi controller or the APs. All recommendations are applied manually.
+
+Security-relevant surfaces:
+
+- **Configuration file (`config.yaml`)** contains a UniFi Network API key and, optionally, SSH credentials. The file is gitignored and must never be committed.
+- **SSH trust decisions** are documented in `README.md`. The tool follows the user's existing `~/.ssh/known_hosts` and does not silently accept unknown host keys.
+- **TLS trust for the UniFi controller** follows the user's system trust store. Self-signed controller certificates require an explicit `--insecure`-equivalent path documented in `README.md`.
+- **No telemetry, no outbound calls** beyond the configured UniFi controller and the configured APs.
+
+Bugs that could invalidate any of the above (accidental write, credential leak in logs, weakened TLS/SSH verification, unintended outbound requests) are in scope.
