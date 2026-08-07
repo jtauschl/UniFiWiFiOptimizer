@@ -1,0 +1,15 @@
+local_sha256_at_documentation: f755f153db868f6da8643e4ec0fdba669e603361bd32d668db99b69ff54098b5
+upstream_sha256_at_documentation: 8aab41b318078ab475332729b7e9ec1159d3b1fbd9107114306e437ea34bcb31
+
+Divergence from sw_dev_handbook v0.10.5 templates/scripts/github-security-settings.sh.example:
+
+- Line "SW_DEV_HANDBOOK_DOC_REF=${SW_DEV_HANDBOOK_DOC_REF:-REPLACE_WITH_YOUR_PINNED_SW_DEV_HANDBOOK_TAG}"
+  is replaced with "SW_DEV_HANDBOOK_DOC_REF=${SW_DEV_HANDBOOK_DOC_REF:-v0.10.5}" — same placeholder
+  substitution convention as in handbook-check.sh.
+
+- Indentation is 2-space instead of the template's 4-space, to match this project's own
+  .editorconfig (indent_size = 2) and shfmt -d gate. shfmt -w is applied via ./dev fmt at
+  copy-in time. No behavioral or structural deltas from this reformat.
+
+Refresh both hashes above whenever this file is re-copied from the template or whenever the pinned
+handbook tag changes.

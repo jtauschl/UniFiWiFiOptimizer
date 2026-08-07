@@ -117,7 +117,7 @@ set -euo pipefail
 # by working, just wrongly, for anyone who forgot to re-pin it after copying this template. An
 # invalid placeholder instead makes every resulting doc link 404 loudly until it's actually set,
 # which is far easier to notice than a link that resolves to the wrong policy version silently.
-SW_DEV_HANDBOOK_DOC_REF="${SW_DEV_HANDBOOK_DOC_REF:-v0.10.4}"
+SW_DEV_HANDBOOK_DOC_REF="${SW_DEV_HANDBOOK_DOC_REF:-v0.10.5}"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "github-security-settings: gh CLI not found — https://cli.github.com" >&2

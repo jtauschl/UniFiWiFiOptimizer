@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev — repo-local convenience wrapper (bash, per sw_dev_handbook, pinned v0.10.0).
+# dev — repo-local convenience wrapper (bash, per sw_dev_handbook, pinned v0.10.5).
 #
 # Commands:
 #   ./dev bootstrap       Install/refresh local dev-only setup (currently: the
