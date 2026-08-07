@@ -37,18 +37,22 @@ require_command cp
 require_command sed
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
+# Restore terminal echo before removing tmpdir: a Ctrl-C or SIGTERM
+# between prompt_secret()'s stty -echo/stty echo would otherwise leave
+# the user's shell silently accepting input until they blindly type
+# `stty echo` or `reset`.
+trap 'stty echo </dev/tty 2>/dev/null || true; rm -rf "$tmpdir"' EXIT INT TERM
 
 has_prompt_io() {
   [ -r "$PROMPT_INPUT" ] && [ -w "$PROMPT_OUTPUT" ]
 }
 
 tty_print() {
-  printf '%s' "$1" >> "$PROMPT_OUTPUT"
+  printf '%s' "$1" >>"$PROMPT_OUTPUT"
 }
 
 tty_println() {
-  printf '%s\n' "$1" >> "$PROMPT_OUTPUT"
+  printf '%s\n' "$1" >>"$PROMPT_OUTPUT"
 }
 
 prompt_line() {
@@ -75,9 +79,9 @@ prompt_secret() {
 
   tty_print "$prompt: "
   if [ "$PROMPT_INPUT" = "/dev/tty" ] && [ -r /dev/tty ]; then
-    stty -echo < /dev/tty
+    stty -echo </dev/tty
     IFS= read -r answer <&3 || answer=""
-    stty echo < /dev/tty
+    stty echo </dev/tty
     tty_println ""
   else
     IFS= read -r answer <&3 || answer=""
@@ -91,15 +95,15 @@ prompt_yes_no() {
   answer=""
 
   case "$default_answer" in
-    y|Y) suffix='[Y/n]' ;;
-    *) suffix='[y/N]' ;;
+  y | Y) suffix='[Y/n]' ;;
+  *) suffix='[y/N]' ;;
   esac
 
   tty_print "$prompt $suffix "
   IFS= read -r answer <&3 || answer=""
   case "${answer:-$default_answer}" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
+  y | Y | yes | YES | Yes) return 0 ;;
+  *) return 1 ;;
   esac
 }
 
@@ -110,7 +114,7 @@ write_controller_config() {
   escaped_url=$(printf '%s' "$controller_url" | sed 's/\\/\\\\/g; s/"/\\"/g')
   escaped_api_key=$(printf '%s' "$controller_api_key" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-  cat > "$dest_path" <<EOF
+  cat >"$dest_path" <<EOF
 controller:
   url: "$escaped_url"
   api_key: "$escaped_api_key"
@@ -242,9 +246,9 @@ run_optional_setup() {
   ap_names_path="${tmpdir}/ap-names.txt"
 
   case "$INTERACTIVE_SETUP" in
-    0|false|False|FALSE|no|No|NO)
-      return 0
-      ;;
+  0 | false | False | FALSE | no | No | NO)
+    return 0
+    ;;
   esac
 
   if ! has_prompt_io; then
@@ -255,7 +259,7 @@ run_optional_setup() {
     return 0
   fi
 
-  exec 3< "$PROMPT_INPUT"
+  exec 3<"$PROMPT_INPUT"
 
   if ! prompt_yes_no "Create or update config.yaml now?" y; then
     return 0
@@ -285,12 +289,12 @@ run_optional_setup() {
 
   tty_println ""
   tty_println "Available sites:"
-  if ! "$INSTALL_ROOT/unifiwifioptimizer" --sites > "$tmpdir/sites.out" 2> "$tmpdir/sites.err"; then
-    cat "$tmpdir/sites.err" >> "$PROMPT_OUTPUT"
+  if ! "$INSTALL_ROOT/unifiwifioptimizer" --sites >"$tmpdir/sites.out" 2>"$tmpdir/sites.err"; then
+    cat "$tmpdir/sites.err" >>"$PROMPT_OUTPUT"
     tty_println "Skipping site setup."
     return 0
   fi
-  cat "$tmpdir/sites.out" >> "$PROMPT_OUTPUT"
+  cat "$tmpdir/sites.out" >>"$PROMPT_OUTPUT"
 
   if ! prompt_yes_no "Generate a site config now?" n; then
     return 0
@@ -302,17 +306,17 @@ run_optional_setup() {
     return 0
   fi
 
-  if ! "$INSTALL_ROOT/unifiwifioptimizer" --config "$site_id" > "$skeleton_path" 2> "$tmpdir/config.err"; then
-    cat "$tmpdir/config.err" >> "$PROMPT_OUTPUT"
+  if ! "$INSTALL_ROOT/unifiwifioptimizer" --config "$site_id" >"$skeleton_path" 2>"$tmpdir/config.err"; then
+    cat "$tmpdir/config.err" >>"$PROMPT_OUTPUT"
     tty_println "Keeping controller-only config."
     return 0
   fi
 
   tty_println ""
   tty_println "Access points in $site_id:"
-  extract_ap_names "$skeleton_path" > "$ap_names_path"
-  sed 's/^/  - /' "$ap_names_path" > "$tmpdir/ap-list.txt"
-  cat "$tmpdir/ap-list.txt" >> "$PROMPT_OUTPUT"
+  extract_ap_names "$skeleton_path" >"$ap_names_path"
+  sed 's/^/  - /' "$ap_names_path" >"$tmpdir/ap-list.txt"
+  cat "$tmpdir/ap-list.txt" >>"$PROMPT_OUTPUT"
 
   ssh_user=$(extract_default_ssh_user "$skeleton_path")
   ssh_user=$(prompt_line "SSH user" "${ssh_user:-YOUR_SSH_USER}")
@@ -321,7 +325,7 @@ run_optional_setup() {
     ssh_password=$(prompt_secret "SSH password")
   fi
 
-  : > "$neighbor_spec_path"
+  : >"$neighbor_spec_path"
   if prompt_yes_no "Configure AP neighbors now?" n; then
     tty_println ""
     # shellcheck disable=SC2094
@@ -330,10 +334,11 @@ run_optional_setup() {
       while :; do
         neighbors=$(prompt_line "Neighbors for ${ap_name} (comma-separated, blank for none)" "")
         if [ -z "$neighbors" ]; then
-          printf '%s\t\n' "$ap_name" >> "$neighbor_spec_path"
+          printf '%s\t\n' "$ap_name" >>"$neighbor_spec_path"
           break
         fi
-        validation=$(AP_NAMES_PATH="$ap_names_path" NEIGHBORS="$neighbors" python3 - <<'PY'
+        validation=$(
+          AP_NAMES_PATH="$ap_names_path" NEIGHBORS="$neighbors" python3 - <<'PY'
 import os
 
 with open(os.environ["AP_NAMES_PATH"], "r", encoding="utf-8") as handle:
@@ -343,7 +348,7 @@ invalid = [item for item in neighbors if item not in aps]
 print(",".join(invalid))
 print(",".join(neighbors))
 PY
-)
+        )
         invalid=$(printf '%s\n' "$validation" | sed -n '1p')
         normalized=$(printf '%s\n' "$validation" | sed -n '2p')
         if [ -n "$invalid" ]; then
@@ -351,19 +356,19 @@ PY
           tty_println "Use the listed AP names exactly."
           continue
         fi
-        printf '%s\t%s\n' "$ap_name" "$normalized" >> "$neighbor_spec_path"
+        printf '%s\t%s\n' "$ap_name" "$normalized" >>"$neighbor_spec_path"
         break
       done
-    done < "$ap_names_path"
+    done <"$ap_names_path"
   else
     while IFS= read -r ap_name; do
-      [ -n "$ap_name" ] && printf '%s\t\n' "$ap_name" >> "$neighbor_spec_path"
-    done < "$ap_names_path"
+      [ -n "$ap_name" ] && printf '%s\t\n' "$ap_name" >>"$neighbor_spec_path"
+    done <"$ap_names_path"
   fi
 
   edit_site_skeleton "$skeleton_path" "$ssh_user" "$ssh_password" "$neighbor_spec_path"
-  printf '\n' >> "$config_path"
-  cat "$skeleton_path" >> "$config_path"
+  printf '\n' >>"$config_path"
+  cat "$skeleton_path" >>"$config_path"
   tty_println "Wrote site configuration for $site_id to $config_path"
 }
 
@@ -399,12 +404,12 @@ if [ ! -f "$INSTALL_ROOT/config.yaml" ]; then
   cp "$INSTALL_ROOT/config.minimal.yaml" "$INSTALL_ROOT/config.yaml"
 fi
 
-cat > "$BIN_DIR/$CMD_NAME" <<EOF
+cat >"$BIN_DIR/$CMD_NAME" <<EOF
 #!/bin/sh
 exec "$INSTALL_ROOT/unifiwifioptimizer" "\$@"
 EOF
 
-cat > "$BIN_DIR/$UNINSTALL_NAME" <<EOF
+cat >"$BIN_DIR/$UNINSTALL_NAME" <<EOF
 #!/bin/sh
 exec sh "$INSTALL_ROOT/scripts/uninstall.sh" "\$@"
 EOF
@@ -419,10 +424,10 @@ printf '  Launcher: %s/%s\n' "$BIN_DIR" "$CMD_NAME"
 printf '  Uninstall helper: %s/%s\n' "$BIN_DIR" "$UNINSTALL_NAME"
 
 case ":${PATH:-}:" in
-  *:"$BIN_DIR":*) ;;
-  *)
-    printf '\nAdd this to your shell profile if needed:\n'
-    # shellcheck disable=SC2016
-    printf '  export PATH="%s:$PATH"\n' "$BIN_DIR"
-    ;;
+*:"$BIN_DIR":*) ;;
+*)
+  printf '\nAdd this to your shell profile if needed:\n'
+  # shellcheck disable=SC2016
+  printf '  export PATH="%s:$PATH"\n' "$BIN_DIR"
+  ;;
 esac
