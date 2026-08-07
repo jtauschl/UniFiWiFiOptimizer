@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased 0.4.1]
+
+<!--
+Since sw_dev_handbook v0.10.5 there are two open release lines
+(release/0.4.1 hotfix and release/0.5.0 next-release), so this branch's
+own in-progress content lives under [Unreleased 0.4.1] rather than a
+plain [Unreleased] — release/0.5.0's CHANGELOG.md carries a verbatim
+copy of this section, kept in sync per documentation.md#parallel-
+unreleased-release-branches: an edit to any bullet here must land as a
+separate, immediately-following commit on release/0.5.0 before the
+underlying work here is considered done.
+-->
 
 ### Fixed
 - Roaming Assistant recommendations silently stopped working: Ubiquiti removed the per-radio API fields (`radio_table[].assisted_roaming_enabled`/`assisted_roaming_rssi`) at some point after v0.4.0, and the tool was falling back to defaults without any indication. Confirmed against a live controller (Network Application, AP firmware 6.7.54 and 8.7.11).
@@ -93,7 +104,7 @@ First public release.
 - UniFi Network API integration (read-only).
 - Multi-site support.
 
-[Unreleased]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...HEAD
+[Unreleased 0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.1.0...v0.2.0
