@@ -50,11 +50,22 @@ CORRIDOR_WIDTH=6 # corridor width in dB
 # Roaming Assistant per-AP recommendation (see ALGORITHM.md §7).
 # Default = TX_LO + ROAM_OFFSET_DB. Capped against weakest neighbor only when
 # that neighbor is below TX_LO (weakest-neighbor-below-corridor), then clamped to [FLOOR, CEILING].
-# ROAM_OFFSET_DB=9 reproduces the legacy voice value of -67 dBm for Obstructed.
+# FLOOR/CEILING match published BTM triggers: Apple iOS/iPad -70 dBm, macOS -75 dBm
+# (support.apple.com/guide/deployment/dep98f116c0f). A floor below -75 lets BTM fire
+# after macOS clients have already fallen; a ceiling above -65 approaches voice-only
+# territory that is aggressive for a data client fleet.
+# To reproduce the legacy fixed -67 dBm behavior for VoWLAN sites, set
+# ROAM_CEILING=-67 ROAM_OFFSET_DB=<value> where the offset lifts TX_LO to -67
+# for the site's environment (Obstructed: +9, Office: +7, Residential: +6, Open: +5).
 ROAM_OFFSET_DB=${ROAM_OFFSET_DB:-0}
 ROAM_MARGIN_DB=${ROAM_MARGIN_DB:-5}
-ROAM_FLOOR=${ROAM_FLOOR:--78}
-ROAM_CEILING=${ROAM_CEILING:--67}
+ROAM_FLOOR=${ROAM_FLOOR:--75}
+ROAM_CEILING=${ROAM_CEILING:--65}
+# Minimum RSSI (hard disconnect) sits below the BTM (soft-roam) trigger so a
+# client has a window to actually roam before being kicked. Vendor consensus is
+# 5-8 dB below; setting it equal to the BTM trigger produces disconnect loops
+# on modern clients that already honor 802.11v.
+MIN_RSSI_OFFSET_DB=${MIN_RSSI_OFFSET_DB:-5}
 #
 # Path loss exponent n: set environment per site in config.yaml (default: Residential)
 # Values are derived from ITU-R P.1238 Table 2, using n where ITU expresses
@@ -81,7 +92,7 @@ SCAN_ATTEMPTS=2
 # error mid-run. Failing here keeps the error message close to the cause.
 validate_roam_constants() {
   local var
-  for var in ROAM_OFFSET_DB ROAM_MARGIN_DB ROAM_FLOOR ROAM_CEILING; do
+  for var in ROAM_OFFSET_DB ROAM_MARGIN_DB ROAM_FLOOR ROAM_CEILING MIN_RSSI_OFFSET_DB; do
     if ! [[ "${!var}" =~ ^-?[0-9]+$ ]]; then
       printf 'ERROR: %s must be an integer (got: %s)\n' "$var" "${!var}" >&2
       exit 1
@@ -95,6 +106,13 @@ validate_roam_constants() {
   fi
   if ((ROAM_MARGIN_DB < 0 || ROAM_MARGIN_DB > 30)); then
     printf 'ERROR: ROAM_MARGIN_DB must be in 0..30 dB (got: %d)\n' "$ROAM_MARGIN_DB" >&2
+    exit 1
+  fi
+  # MIN_RSSI_OFFSET_DB: how far below the BTM trigger the hard-disconnect sits.
+  # 0 would collapse Min-RSSI onto the BTM trigger (no roaming window); 30 dB
+  # would push Min-RSSI into noise-floor territory.
+  if ((MIN_RSSI_OFFSET_DB < 0 || MIN_RSSI_OFFSET_DB > 30)); then
+    printf 'ERROR: MIN_RSSI_OFFSET_DB must be in 0..30 dB (got: %d)\n' "$MIN_RSSI_OFFSET_DB" >&2
     exit 1
   fi
   # Floor/ceiling are RSSI dBm values used as bounds for the Roaming Assistant
@@ -1750,12 +1768,13 @@ calculate_tx_shift() {
 # ============================================================================
 # Minimum RSSI Calculation (ALGORITHM.md §6)
 # ============================================================================
-# Minimum RSSI is always recommended as TX_LO — the lower bound of the TX
-# corridor. This is the point where the neighboring cell is clearly stronger
-# and a hard disconnect makes sense if Minimum RSSI is enabled at all.
+# Minimum RSSI recommendation sits MIN_RSSI_OFFSET_DB below TX_LO. TX_LO is the
+# BTM (soft-roam) trigger for a data client fleet at this environment; a hard
+# disconnect at exactly that value leaves no roaming window and creates
+# disconnect loops on 802.11v-capable clients. Vendor consensus is 5-8 dB below.
 
 calculate_min_rssi_recommendation() {
-  _result=$TX_LO
+  _result=$((TX_LO - MIN_RSSI_OFFSET_DB))
 }
 
 # Per-AP Roaming Assistant threshold.
