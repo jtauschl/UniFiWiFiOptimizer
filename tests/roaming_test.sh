@@ -883,7 +883,11 @@ srv.handle_request()
   if [[ -z "$port" ]]; then
     fail_count=$((fail_count + 1))
     printf 'FAIL: %s\n' "test setup: local HTTP server for malformed-response test never started" >&2
-    kill "$server_pid" 2>/dev/null
+    # `kill` returns non-zero if the child has already exited (bind race,
+    # sigpipe on server_log write). Under `set -e` that aborts the whole
+    # test script, skipping teardown, every subsequent test, and the final
+    # pass/fail summary. Swallow the exit status with `|| true`.
+    kill "$server_pid" 2>/dev/null || true
     teardown_fixture
     return
   fi
@@ -895,7 +899,14 @@ srv.handle_request()
   fetch_site_apgroups "$site" || rc=$?
   assert_eq "0" "$rc" "fetch_site_apgroups must survive a malformed (invalid JSON) response body, not just a connection failure"
 
-  wait "$server_pid" 2>/dev/null
+  # `wait` propagates the child's exit status; a non-zero exit from the
+  # python HTTP subprocess (unhandled handler exception, sigpipe on
+  # stdout, Python 3.13+ stricter close semantics) aborts the script
+  # under `set -e` before teardown_fixture runs, hiding the whole
+  # roaming_test.sh summary line. Same guard shape as the fetch_* call
+  # three lines up.
+  local _srv_rc=0
+  wait "$server_pid" 2>/dev/null || _srv_rc=$?
 
   teardown_fixture
 }

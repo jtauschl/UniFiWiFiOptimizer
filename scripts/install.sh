@@ -39,7 +39,11 @@ require_command cp
 require_command sed
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
+# Restore terminal echo before removing tmpdir: a Ctrl-C or SIGTERM
+# between `stty -echo`/`stty echo` around the SSH-password prompt would
+# otherwise leave the user's shell silently accepting input until they
+# blindly type `stty echo` or `reset`.
+trap 'stty echo </dev/tty 2>/dev/null || true; rm -rf "$tmpdir"' EXIT INT TERM
 
 # Return success if the configured prompt input and output paths are usable.
 has_prompt_io() {

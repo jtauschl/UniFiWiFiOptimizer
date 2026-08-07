@@ -2010,9 +2010,9 @@ tx_pending_count_path() {
 prepare_site_tx_checks() {
   local site=$1
   local pending=0
-  local ap mac_col
+  local current_site ap mac_col _ip_col _model_col
   local band_key band_mac curr_tx min_tx_b max_tx_b txmode
-  local radio_info
+  local radio_info radio_ch radio_cht scan_prefix scan_file
   local peers peer peer_cache rssi_to
   local sum_rssi count_nbr peer_count has_missing_partial
 
@@ -2022,15 +2022,36 @@ prepare_site_tx_checks() {
     [[ "$current_site" != "$site" ]] && continue
 
     peers="$(get_peers "$site" "$ap")"
+    scan_prefix=$(ap_scan_prefix "$site" "$ap")
 
     for band_key in 2g 5g; do
       radio_info=$(get_radio_info "$site" "$ap")
       if [[ "$band_key" == "2g" ]]; then
-        IFS='|' read -r _ _ curr_tx min_tx_b max_tx_b txmode _ <<<"$radio_info"
+        IFS='|' read -r radio_ch radio_cht curr_tx min_tx_b max_tx_b txmode _ <<<"$radio_info"
       else
-        IFS='|' read -r _ _ _ _ _ _ _ _ _ _ curr_tx min_tx_b max_tx_b txmode _ <<<"$radio_info"
+        IFS='|' read -r _ _ _ _ _ _ _ _ radio_ch radio_cht curr_tx min_tx_b max_tx_b txmode _ <<<"$radio_info"
       fi
-      curr_tx=${curr_tx:-11}
+
+      # Skip a band the AP does not actually operate: the scan file marks
+      # it with ===NO_RADIO=== (see analyze_band's own early-return, which
+      # renders "band not active"), and the API returns no ch/width/tx.
+      # Without this guard, the site-level pending-TX count picks up phantom
+      # bands that never appear in the per-AP report.
+      scan_file="${scan_prefix}.${band_key}"
+      if grep -qF '===NO_RADIO===' "$scan_file" 2>/dev/null &&
+        [[ -z "${radio_ch}${radio_cht}${curr_tx}" ]]; then
+        continue
+      fi
+
+      # Defaults must match analyze_band's own defaults for the same fields
+      # (see the AP loop near the end of the file): 11 dBm for 2.4 GHz,
+      # 20 dBm for 5 GHz. Any divergence here versus there produces a
+      # site-summary count that disagrees with the per-AP report.
+      if [[ "$band_key" == "2g" ]]; then
+        curr_tx=${curr_tx:-11}
+      else
+        curr_tx=${curr_tx:-20}
+      fi
       min_tx_b=${min_tx_b:-$TX_MIN}
       max_tx_b=${max_tx_b:-$TX_MAX}
       txmode=${txmode:-custom}
@@ -2122,7 +2143,8 @@ prepare_site_roaming_checks() {
   # be wrong: the presence flag above already correctly recorded that the
   # field WAS seen, so the WLAN must show as unevaluable, not N/A.
 
-  local wlan_row wlan_name ap_group_ids_field
+  local wlan_row wlan_name ap_group_ids_field profile_name
+  local current_site
 
   while IFS=$'\t' read -r current_site wlan_name profile_name; do
     [[ "$current_site" != "$site" ]] && continue
@@ -2176,14 +2198,22 @@ prepare_site_roaming_checks() {
     local _seen_ap=" " _seen_mac=" "
     local broadcasting_aps=() unresolved_macs=() unresolved_group_ids=()
     local gid mac ap_name
-    for gid in ${ap_group_ids_field//|/ }; do
+    # Split the pipe-delimited fields into arrays with `read -a` -- an
+    # unquoted `${var//|/ }` in a for-loop header would be subject to
+    # both word-splitting AND pathname expansion, so a UniFi id or MAC
+    # that happened to contain a shell glob metachar could silently
+    # iterate over local filenames instead.
+    local -a _gids _macs
+    IFS='|' read -r -a _gids <<<"$ap_group_ids_field"
+    for gid in "${_gids[@]}"; do
       local macs_field
       macs_field=$(awk -F "$WLAN_FIELD_SEP" -v id="$gid" '$1 == id { print $2; exit }' "$(site_apgroups_tsv_path "$site")")
       if [[ -z "$macs_field" ]]; then
         unresolved_group_ids+=("$gid")
         continue
       fi
-      for mac in ${macs_field//|/ }; do
+      IFS='|' read -r -a _macs <<<"$macs_field"
+      for mac in "${_macs[@]}"; do
         [[ "$_seen_mac" == *" ${mac} "* ]] && continue
         _seen_mac+="${mac} "
         ap_name=$(awk -F '\t' -v site="$site" -v mac="$mac" '$1 == site && $3 == mac { print $2; exit }' "$APS_FILE")
@@ -2822,19 +2852,12 @@ print_general_check_missing() {
   printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "$expected"
 }
 
-# Roaming Assistant compliance check (ALGORITHM.md §7). Compares the WLAN's
-# actual roaming_assistant_na_* value against the site-aware target computed
-# by prepare_site_roaming_checks() and cached in roaming_wlan.tsv/
-# roaming_detail.tsv. Band applicability is decided from actual_wifi_bands
-# (the real controller config), never from the profile's expected bands --
-# a WLAN that deviates from its profile on band already gets flagged by the
-# separate "WiFi Band" check, so this avoids reporting the same deviation twice.
-# Surfaces a "fix TX power first" hint alongside an incomplete/not_evaluable
-# Roaming Assistant verdict, when this site still has pending TX power
-# recommendations (see prepare_site_tx_checks()) -- a missing neighbor
-# sighting is often caused by TX power being too low to reach that neighbor,
-# so pointing at the more fundamental fix first avoids chasing a roaming
-# symptom whose root cause is elsewhere.
+# Print a hint noting how many pending TX-power recommendations are still
+# open on this site. A missing sighting is often caused by TX power being
+# too low to reach the neighbor, so pointing at the more fundamental fix
+# first avoids chasing a symptom (e.g. an Incomplete/Not-evaluable Roaming
+# Assistant verdict) whose root cause is elsewhere. Silent if the count
+# file is missing or zero.
 print_tx_pending_note() {
   local site=$1
   local pending
@@ -2846,7 +2869,17 @@ print_tx_pending_note() {
     "$pending" "$plural"
 }
 
-# Print the Roaming Assistant compliance line for a WLAN, using cached aggregate data.
+# Roaming Assistant compliance check (ALGORITHM.md §7). Compares the WLAN's
+# actual roaming_assistant_na_* value against the site-aware target computed
+# by prepare_site_roaming_checks() and cached in roaming_wlan.tsv/
+# roaming_detail.tsv. Band applicability is decided from actual_wifi_bands
+# (the real controller config), never from the profile's expected bands --
+# a WLAN that deviates from its profile on band already gets flagged by the
+# separate "WiFi Band" check, so this avoids reporting the same deviation twice.
+# Surfaces a "fix TX power first" hint alongside an incomplete/not_evaluable
+# Roaming Assistant verdict, when this site still has pending TX power
+# recommendations (see prepare_site_tx_checks()) -- a missing neighbor
+# sighting is often caused by TX power being too low to reach that neighbor.
 print_general_check_roaming_assistant() {
   local site=$1 wlan_name=$2 na_enabled=$3 na_rssi=$4 actual_wifi_bands=$5 expected_roaming_assistant=$6
   local label="Roaming Assistant"
@@ -2899,7 +2932,12 @@ print_general_check_roaming_assistant() {
     return
   fi
 
-  if ! is_true "$na_enabled" || ((na_rssi != aggregated_rssi)); then
+  # A blank na_rssi (partial API response, migration in progress) must not
+  # be coerced by bash arithmetic to 0 and then compared against the real
+  # aggregated_rssi -- that would report every such WLAN as a deviation with
+  # no visible reason. Treat "no value returned" as its own deviation state
+  # and print blank rather than the coerced zero.
+  if ! is_true "$na_enabled" || [[ -z "$na_rssi" ]] || ((na_rssi != aggregated_rssi)); then
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s Enabled, %s dBm${RESET}\n" "$label" "$aggregated_rssi"
   else
@@ -2944,6 +2982,7 @@ print_general_checks() {
   local expected_bss_transition expected_uapsd expected_dtim_mode expected_dtim24 expected_dtim5 expected_dtim6
   local expected_group_rekey expected_ap_name_in_beacon expected_roaming_assistant
   local actual_wifi_bands actual_security_protocol actual_pmf
+  local current_site wlan_name profile_name
 
   if [[ ! -s "$(site_wlans_tsv_path "$site")" ]]; then
     printf "  ${YELLOW}  ! Could not read WLAN settings from UniFi API for site %s${RESET}\n" "$site"
