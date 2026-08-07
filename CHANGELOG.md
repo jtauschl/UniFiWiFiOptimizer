@@ -20,13 +20,18 @@ the version's goal, not a status recap or an approach detail).
 - "Fix TX power first" note next to an `Incomplete`/`Not evaluable` Roaming Assistant verdict when the site still has pending TX power recommendations — a missing sighting is often caused by TX power being too low to reach the neighbor.
 - `roaming_assistant` profile field: whether Roaming Assistant / "Handoff Suggestions (802.11v)" should be enabled at all for a WLAN, distinct from `fast_roaming` (802.11r) and `bss_transition` (802.11v protocol support itself). Only the on/off expectation is profile-driven — the RSSI threshold stays computed from the site's RF model. Shipped defaults: disabled for `Standard`/`IoT`/`Hotspot`, enabled for `Throughput`/`Latency`. A deviation is flagged (✗) the same way any other profile check is. See `docs/ALGORITHM.md` §7 "Enable/disable expectation".
 - `tests/roaming_test.sh`, `tests/tx_test.sh`, run automatically by `./dev ci`.
-- `.github/dependabot.yml` (github-actions weekly, pip weekly). Note: Dependabot reads the config only from the default branch, so it becomes active after this release branch is fast-forward-promoted to `main`.
+- `.github/dependabot.yml` (github-actions weekly). Note: Dependabot reads the config only from the default branch, so it becomes active after this release branch is fast-forward-promoted to `main`.
 - Doc-comments on every Top-Level Bash function in `unifiwifioptimizer` and `scripts/install.sh` (sw_dev_handbook v0.9.1).
 
 ### Changed
 - `sw_dev_handbook` pin bumped from v0.10.4 to v0.10.5.
 - `dev` wrapper header pin bumped from a stale `v0.10.0` label to `v0.10.5`.
-- `scripts/handbook-check.sh` refreshed from the v0.10.5 template — adds `copied_script_drift` check, `--whats-new [<target-tag>]` mode, and markdown heading-anchor validation to internal-link checks.
+- `scripts/handbook-check.sh` refreshed from the v0.10.5 template — adds `copied_script_drift` check (WARN-only, compares this project's copies of `handbook-check.sh`/`github-security-settings.sh` against their upstream templates and expects `.divergence-reason` sidecars) and a `--whats-new [<target-tag>]` mode that prints the handbook's own `CHANGELOG.md` sections between this project's currently-pinned tag and a target tag.
+
+### Fixed
+- `./dev handbook-check` now passes command-line flags through to `scripts/handbook-check.sh` — previously `--migrate` and `--whats-new` were silently dropped because the wrapper called the script bare.
+- `.github/dependabot.yml` no longer declares a `pip` ecosystem — this repo has no Python manifest for Dependabot's pip updater to parse; the one pinned Python dependency (semgrep, inline in `ci.yml`'s `pip install` step) is not readable to Dependabot regardless.
+- Reference-link definitions at the bottom of this `CHANGELOG.md` now match the actual `[Unreleased 0.5.0]` and `[Unreleased 0.4.1]` headings introduced by the v0.10.5 parallel-unreleased model — previously they referred to a `[Unreleased]` heading that no longer exists, so GitHub rendered the new headings as literal bracketed text.
 
 ## [Unreleased 0.4.1]
 
@@ -125,7 +130,8 @@ First public release.
 - UniFi Network API integration (read-only).
 - Multi-site support.
 
-[Unreleased]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...HEAD
+[Unreleased 0.5.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.5.0
+[Unreleased 0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.4.1
 [0.4.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.1.0...v0.2.0

@@ -26,15 +26,10 @@ updates:
     labels:
       - "ci/cd"
 
-  # Python packages used inside CI (currently just semgrep, pinned in
-  # .github/workflows/ci.yml).
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
-    labels:
-      - "ci/cd"
+  # No pip ecosystem block: this repo has no requirements*.txt,
+  # pyproject.toml, setup.py, Pipfile, or setup.cfg for Dependabot's pip
+  # updater to parse. The one pinned Python dependency (semgrep, in
+  # .github/workflows/ci.yml as `pip install semgrep==<version>`) is
+  # inline in a shell run: step, which Dependabot cannot see. Bumping
+  # semgrep is currently a manual step; if a Python manifest is ever
+  # added, a `- package-ecosystem: "pip"` block can be added here.

@@ -105,10 +105,11 @@ run_build() {
 
 run_handbook_check() {
   require yq "brew install yq (macOS) -- must be mikefarah/yq v4, not kislyuk/yq"
-  ./scripts/handbook-check.sh
+  ./scripts/handbook-check.sh "$@"
 }
 
 cmd="${1:-}"
+shift || true
 case "$cmd" in
 bootstrap)
   run_bootstrap
@@ -135,7 +136,7 @@ lint)
   run_shellcheck
   ;;
 handbook-check)
-  run_handbook_check
+  run_handbook_check "$@"
   ;;
 *)
   echo "usage: ./dev {bootstrap|test|build|ci|fmt|lint|handbook-check}"
