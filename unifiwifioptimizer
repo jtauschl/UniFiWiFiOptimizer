@@ -128,6 +128,7 @@ REC_LABEL_WIDTH=24
 # Helper Functions
 # ============================================================================
 
+# Print the CLI usage message to stdout.
 print_usage() {
   cat <<'EOF'
 Usage:
@@ -139,6 +140,7 @@ Usage:
 EOF
 }
 
+# Abort with an error if the config file does not exist.
 require_config_file() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE" >&2
@@ -146,6 +148,7 @@ require_config_file() {
   fi
 }
 
+# Abort with an error if the profiles file does not exist.
 require_profiles_file() {
   if [[ ! -f "$PROFILES_FILE" ]]; then
     echo "ERROR: Profiles file not found: $PROFILES_FILE" >&2
@@ -153,10 +156,12 @@ require_profiles_file() {
   fi
 }
 
+# Print a note that the UniFi controller API is not reachable.
 print_api_unavailable_note() {
   printf 'NOTE: API (%s) is not available.\n' "$UNIFI_URL" >&2
 }
 
+# Fetch JSON from a UniFi controller endpoint into the given output file.
 fetch_api_json() {
   local endpoint=$1 output_path=$2 timeout=${3:-15}
 
@@ -178,6 +183,7 @@ fetch_api_json() {
   fi
 }
 
+# Load controller URL and API key from config.yaml into the environment.
 load_controller_config() {
   ruby - "$CONFIG_FILE" "$tmpdir" <<'RUBY'
 require "yaml"
@@ -200,6 +206,7 @@ RUBY
   . "$ENV_FILE"
 }
 
+# Verify that all required external commands are available or abort with an error.
 check_dependencies() {
   local missing=()
   local cmd
@@ -225,6 +232,7 @@ check_dependencies() {
   fi
 }
 
+# Parse config.yaml and profiles.yaml into TSV files under tmpdir for downstream use.
 load_yaml_config() {
   ruby - "$CONFIG_FILE" "$PROFILES_FILE" "$tmpdir" <<'RUBY'
 require "yaml"
@@ -387,35 +395,42 @@ RUBY
   . "$ENV_FILE"
 }
 
+# Replace filesystem-unsafe characters in the input with underscores.
 sanitize_token() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
+# Return the tmpdir path used to cache a site's device JSON snapshot.
 site_devices_json_path() {
   local site=$1
   printf "%s/%s.devices.json\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Return the tmpdir path used to cache a site's WLAN configuration TSV.
 site_wlans_tsv_path() {
   local site=$1
   printf "%s/%s.wlans.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Return the tmpdir path used to cache a site's management settings JSON.
 site_mgmt_json_path() {
   local site=$1
   printf "%s/%s.mgmt.json\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Return the tmpdir path used to cache a site's per-AP radio settings TSV.
 site_radio_tsv_path() {
   local site=$1
   printf "%s/%s.radios.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Return the tmpdir path used to cache a site's AP groups TSV.
 site_apgroups_tsv_path() {
   local site=$1
   printf "%s/%s.apgroups.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Print the configured SSH user and password for a site as a tab-separated pair.
 site_ssh_credentials() {
   local site=$1 creds
   creds=$(awk -F '\t' -v site="$site" '$1 == site { print $4 "\t" $5; exit }' "$SITES_FILE")
@@ -426,6 +441,7 @@ site_ssh_credentials() {
   printf '%s\n' "$creds"
 }
 
+# Fetch the list of sites from the UniFi controller into a TSV cache file.
 fetch_controller_sites() {
   local raw_file="${tmpdir}/controller-sites.json"
 
@@ -455,6 +471,7 @@ PY
   fi
 }
 
+# Abort if any site in config.yaml is not present on the UniFi controller.
 validate_config_sites() {
   local site _n _label _ssh_user _ssh_password
   while IFS=$'\t' read -r site _n _label _ssh_user _ssh_password; do
@@ -466,6 +483,7 @@ validate_config_sites() {
   done <"$SITES_FILE"
 }
 
+# Resolve a user-supplied site identifier against the controller site list or abort.
 resolve_site_id() {
   local site_id=$1
   local match
@@ -480,11 +498,13 @@ resolve_site_id() {
   exit 1
 }
 
+# Fetch the device inventory JSON for a site into its tmpdir cache path.
 fetch_site_devices() {
   local site=$1
   fetch_api_json "/proxy/network/api/s/${site}/stat/device" "$(site_devices_json_path "$site")"
 }
 
+# Fetch and parse WLAN configuration for a site into a TSV cache file.
 fetch_site_wlan_info() {
   local site=$1
   local raw_file
@@ -549,6 +569,7 @@ PY
   fi
 }
 
+# Fetch a site's management settings (default SSH user, etc.) into its cache path.
 fetch_site_mgmt_settings() {
   local site=$1
   fetch_api_json "/proxy/network/api/s/${site}/rest/setting/mgmt" "$(site_mgmt_json_path "$site")"
@@ -605,6 +626,7 @@ PY
   fi
 }
 
+# Print the number of access points at a site, or "?" if the API is unavailable.
 count_site_access_points() {
   local site=$1
 
@@ -632,6 +654,7 @@ PY
   fi
 }
 
+# Build per-site AP and radio inventories from controller data for later analysis.
 build_site_inventory() {
   local site _n _label _ssh_user _ssh_password
 
@@ -800,6 +823,7 @@ PY
   done <"$SITES_FILE"
 }
 
+# Print the list of controller sites with their AP counts.
 show_sites() {
   local site_id site_name _hidden_id _device_count ap_count
 
@@ -818,6 +842,7 @@ show_sites() {
   echo
 }
 
+# Print the WLANs and access points configured at the selected site.
 show_site_env() {
   local selector=$1
   local resolved site_id site_name _hidden_id _device_count
@@ -884,6 +909,7 @@ PY
   echo
 }
 
+# Print a config.yaml skeleton for the selected site prefilled from controller data.
 print_config_skeleton() {
   local selector=$1
   local resolved site_id site_name _hidden_id _device_count
@@ -997,6 +1023,7 @@ print("")
 PY
 }
 
+# Run the embedded WiFi scan script on an access point over SSH and stream results.
 ssh_scan_ap() {
   local host="$1"
   local ssh_password="${2:-}"
@@ -1006,20 +1033,24 @@ ssh_scan_ap() {
 cache_dir="/tmp/unifiwifioptimizer_scan.$$"
 mkdir -p "$cache_dir" 2>/dev/null || cache_dir="/tmp"
 
+# Remove the AP-side scan cache directory on exit.
 cleanup_scan_cache() {
   rm -rf "$cache_dir" 2>/dev/null
 }
 
 trap cleanup_scan_cache EXIT
 
+# Replace filesystem-unsafe characters in an interface name with underscores.
 sanitize_iface_token() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
+# Return the cached-file path for the full "iw dev" dump.
 iw_dev_dump_path() {
   printf '%s/iw_dev.txt\n' "$cache_dir"
 }
 
+# Populate the "iw dev" cache file on first use and print its path.
 ensure_iw_dev_dump() {
   _path=$(iw_dev_dump_path)
   if [ ! -f "$_path" ]; then
@@ -1028,10 +1059,12 @@ ensure_iw_dev_dump() {
   printf '%s\n' "$_path"
 }
 
+# Return the cached-file path for a specific interface's info dump.
 iface_info_path() {
   printf '%s/iface_%s.info\n' "$cache_dir" "$(sanitize_iface_token "$1")"
 }
 
+# Populate the interface info cache file on first use and print its path.
 ensure_iface_info() {
   _path=$(iface_info_path "$1")
   if [ ! -f "$_path" ]; then
@@ -1040,10 +1073,12 @@ ensure_iface_info() {
   printf '%s\n' "$_path"
 }
 
+# Return the cached-file path for a specific PHY's info dump.
 phy_info_path() {
   printf '%s/phy_%s.info\n' "$cache_dir" "$1"
 }
 
+# Populate the PHY info cache file on first use and print its path.
 ensure_phy_info() {
   _path=$(phy_info_path "$1")
   if [ ! -f "$_path" ]; then
@@ -1052,31 +1087,37 @@ ensure_phy_info() {
   printf '%s\n' "$_path"
 }
 
+# List all wireless interface names known to the kernel.
 list_ifaces() {
   _path=$(ensure_iw_dev_dump)
   awk '/Interface/{print $2}' "$_path"
 }
 
+# Print the operating mode (managed, AP, monitor, ...) of the given interface.
 iface_type() {
   _path=$(ensure_iface_info "$1")
   awk '/type/{print $2; exit}' "$_path"
 }
 
+# Print the PHY index that the given interface is attached to.
 iface_wiphy() {
   _path=$(ensure_iface_info "$1")
   awk '/wiphy/{print $2; exit}' "$_path"
 }
 
+# Print the interface's current operating frequency in MHz, or nothing if unknown.
 iface_freq() {
   _path=$(ensure_iface_info "$1")
   awk '/channel/ { gsub(/[()]/,"",$3); f=$3+0; if (f>0) print f; exit }' "$_path"
 }
 
+# Return success if the interface is present and reports info.
 iface_exists() {
   _path=$(ensure_iface_info "$1")
   [ -s "$_path" ]
 }
 
+# Return success if the interface's PHY advertises the SET_SCAN_DWELL feature.
 phy_has_set_scan_dwell() {
   wiphy=$(iface_wiphy "$1")
   [ -n "$wiphy" ] || return 1
@@ -1084,6 +1125,7 @@ phy_has_set_scan_dwell() {
   grep -q "SET_SCAN_DWELL" "$_path"
 }
 
+# Print 1 if the PHY advertises any 5 GHz frequencies, otherwise 0.
 phy_supports_5g() {
   _path=$(ensure_phy_info "$1")
   awk '/\* [0-9]+ MHz/{f=$2+0; if(f>=5000&&f<5900){found=1}} END{print found+0}' "$_path"
@@ -1130,6 +1172,7 @@ find_scan_candidates() {
   echo "$static$discovered"
 }
 
+# Run an "iw scan" on the first usable candidate interface and write hits to outfile.
 run_scan() {
   candidates="$1"
   outfile="$2"
@@ -1205,6 +1248,7 @@ u6_dfs_cac_state_5g() {
   fi
 }
 
+# Print the AP hardware model name read from local board or system info files.
 get_device_model_name() {
   model=$(
     awk -F '=' '/^board\.name=/{print substr($0, index($0, "=") + 1); exit}' /etc/board.info 2>/dev/null
@@ -1261,6 +1305,7 @@ band_is_active() {
   return 1
 }
 
+# Collect a scan for the given band and write the raw hits (or a marker) to outfile.
 collect_band_scan() {
   band="$1"
   outfile="$2"
@@ -1313,6 +1358,7 @@ SCAN
   printf 'SCAN_ATTEMPTS=%s\n%s\n' "$scan_attempts" "$scan_script" | ssh "${ssh_opts[@]}" "$host" 'sh -s'
 }
 
+# Return the MAC address obtained by adding an integer offset to the given MAC.
 mac_with_offset() {
   local mac=$1 offset=$2 hex dec new
   hex=${mac//:/}
@@ -1324,6 +1370,7 @@ mac_with_offset() {
     "${hex:6:2}" "${hex:8:2}" "${hex:10:2}"
 }
 
+# Print the cached RSSI value for a MAC from an RSSI cache file, or empty on miss.
 get_rssi() {
   local mac=$1 file=$2
   # || true: awk exits non-zero when $file doesn't exist (missing cache,
@@ -1333,16 +1380,19 @@ get_rssi() {
   awk -F '\t' -v mac="$mac" '$1 == mac { print $2; exit }' "$file" 2>/dev/null || true
 }
 
+# Print the space-separated list of configured neighbor AP names for a site AP.
 get_peers() {
   local site=$1 ap=$2
   awk -F '\t' -v site="$site" -v ap="$ap" '$1 == site && $2 == ap { print $3; exit }' "$NEIGHBORS_FILE" | tr ',' ' '
 }
 
+# Print the MAC address of the named AP within a site.
 get_ap_mac() {
   local site=$1 ap=$2
   awk -F '\t' -v site="$site" -v ap="$ap" '$1 == site && $2 == ap { print $3; exit }' "$APS_FILE"
 }
 
+# Return success if two APs at a site are configured as neighbors of each other.
 aps_are_peers() {
   local site=$1 ap_a=$2 ap_b=$3 peer
   for peer in $(get_peers "$site" "$ap_a"); do
@@ -1354,6 +1404,7 @@ aps_are_peers() {
   return 1
 }
 
+# Print the maximal adjacency groups of APs at a site as TSV rows.
 list_site_groups() {
   local site=$1
   python3 - "$site" "$NEIGHBORS_FILE" <<'PY'
@@ -1388,16 +1439,19 @@ for group in maximal:
 PY
 }
 
+# Print a metadata value read from a KEY=VALUE meta file.
 get_scan_meta() {
   local key=$1 file=$2
   awk -F '=' -v key="$key" '$1 == key { print $2; exit }' "$file" 2>/dev/null
 }
 
+# Return the RSSI cache path derived from a raw scan output file path.
 scan_rssi_cache_path() {
   local file=$1
   printf '%s.rssi\n' "$file"
 }
 
+# Parse a raw scan output and write a MAC-to-best-RSSI cache TSV file.
 build_rssi_cache_file() {
   local source_file=$1 cache_file=$2
   python3 - "$source_file" "$cache_file" <<'PY'
@@ -1437,6 +1491,7 @@ write_rows(best)
 PY
 }
 
+# Parse a raw scan output and write both RSSI and per-MAC channel cache files.
 build_rssi_cache_file_with_channels() {
   local source_file=$1 rssi_cache_file=$2 chan_cache_file=$3
   python3 - "$source_file" "$rssi_cache_file" "$chan_cache_file" <<'PY'
@@ -1486,6 +1541,7 @@ with open(chan_cache_file, "w", encoding="utf-8") as handle:
 PY
 }
 
+# Aggregate per-pass RSSI caches for a band into a single trimmed-mean cache.
 aggregate_rssi_passes() {
   local scan_prefix=$1 band_key=$2 passes=$3
   python3 - "$scan_prefix" "$band_key" "$passes" <<'PY'
@@ -1562,6 +1618,7 @@ PY
 # instead of using echo + $(...) to avoid subshell forks. Callers must read
 # _result immediately after the call, e.g.: quantize "$val"; result=$_result
 
+# Print the pipe-separated radio-info row for a site's AP, or a placeholder row on miss.
 get_radio_info() {
   local site=$1 ap=$2
   # Placeholder with the exact number of pipe-separated fields expected by the
@@ -1573,6 +1630,7 @@ get_radio_info() {
   ' "$(site_radio_tsv_path "$site")" 2>/dev/null
 }
 
+# Compute the center frequency in MHz for a channel on the given band into _result.
 channel_center_freq_mhz() {
   local band_key=$1 channel=$2
 
@@ -1585,6 +1643,7 @@ channel_center_freq_mhz() {
   esac
 }
 
+# Compute the low and high 5 GHz channel numbers of a bonded width block into _low/_high.
 channel_span_5g() {
   local channel=$1 width=$2
 
@@ -1697,6 +1756,7 @@ channel_span_5g() {
   esac
 }
 
+# Return success if two channel and width combinations occupy overlapping spectrum.
 channels_overlap() {
   local band_key=$1 channel_a=$2 width_a=$3 channel_b=$4 width_b=$5
   local freq_a freq_b half_a half_b low_a high_a low_b high_b
@@ -1739,6 +1799,7 @@ channels_overlap() {
   ((high_a > low_b && high_b > low_a))
 }
 
+# Clamp a TX power value into the given min/max range and write it to _result.
 cap_tx_power() {
   local tx=$1 min_tx=${2:-$TX_MIN} max_tx=${3:-$TX_MAX}
   ((tx < min_tx)) && tx=$min_tx
@@ -1758,6 +1819,7 @@ cap_tx_power() {
 # higher whole-dBm recommendation instead of rounding down.
 # The caller applies cap_tx_power() afterwards.
 
+# Compute the signed TX-power shift needed to center RSSI in the TX corridor into _result.
 calculate_tx_shift() {
   local sum_rssi=$1 count_rssi=$2
   local numerator
@@ -1853,6 +1915,7 @@ calculate_tx_recommendation() {
 # corridor. This is the point where the neighboring cell is clearly stronger
 # and a hard disconnect makes sense if Minimum RSSI is enabled at all.
 
+# Write the recommended Minimum RSSI value (TX_LO) into _result.
 calculate_min_rssi_recommendation() {
   _result=$TX_LO
 }
@@ -1899,11 +1962,13 @@ calculate_roaming_recommendation() {
   _result=$capped
 }
 
+# Return the tmpdir path used to cache a site's aggregated per-WLAN roaming data.
 roaming_wlan_tsv_path() {
   local site=$1
   printf "%s/%s.roaming_wlan.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
 }
 
+# Return the tmpdir path used to cache a site's per-AP roaming detail rows.
 roaming_detail_tsv_path() {
   local site=$1
   printf "%s/%s.roaming_detail.tsv\n" "$tmpdir" "$(sanitize_token "$site")"
@@ -2307,10 +2372,12 @@ is_true() {
   esac
 }
 
+# Print "Enabled" or "Disabled" for a boolean-like input value.
 bool_state() {
   is_true "$1" && echo "Enabled" || echo "Disabled"
 }
 
+# Convert a kbps rate into a human-readable Mbps string with trimmed decimals.
 rate_mbps() {
   local kbps=$1 whole rem frac
   whole=$((kbps / 1000))
@@ -2327,6 +2394,7 @@ rate_mbps() {
   printf '%d.%s\n' "$whole" "$frac"
 }
 
+# Normalize a PMF setting to one of Required, Optional, or Disabled.
 pmf_state() {
   case "$1" in
   required | Required) echo "Required" ;;
@@ -2336,6 +2404,7 @@ pmf_state() {
   esac
 }
 
+# Print the human-readable security protocol name for a WLAN's raw security fields.
 security_protocol_state() {
   local security=$1 wpa_mode=$2 wpa3_support=$3 wpa3_transition=$4
   local enterprise=false
@@ -2363,6 +2432,7 @@ security_protocol_state() {
   fi
 }
 
+# Return success if the security protocol name uses SAE (WPA3 family).
 security_protocol_uses_sae() {
   case "$1" in
   WPA3 | WPA2/WPA3) return 0 ;;
@@ -2370,6 +2440,7 @@ security_protocol_uses_sae() {
   esac
 }
 
+# Normalize UniFi band/bands fields into a pipe-separated list of 2g|5g|6g tokens.
 normalize_wifi_bands() {
   local band=$1 bands=$2
   local source="${bands:-$band}"
@@ -2399,6 +2470,7 @@ normalize_wifi_bands() {
   echo "$normalized"
 }
 
+# Print a human-readable label for a normalized WiFi band token combination.
 wifi_bands_state() {
   local normalized=$1
   case "$normalized" in
@@ -2414,6 +2486,7 @@ wifi_bands_state() {
   esac
 }
 
+# Return success if the normalized band string includes the target token.
 wifi_band_includes() {
   local normalized=$1 target=$2
   case "|$normalized|" in
@@ -2422,6 +2495,7 @@ wifi_band_includes() {
   esac
 }
 
+# Return success if the current security protocol is in the allowed pipe-separated list.
 security_protocol_allowed() {
   local allowed=$1 current=$2 item
   IFS='|' read -r -a allowed_items <<<"$allowed"
@@ -2431,11 +2505,13 @@ security_protocol_allowed() {
   return 1
 }
 
+# Format the allowed security protocol list for human-readable display.
 security_protocol_expected_state() {
   local allowed=$1
   echo "${allowed//|/, }"
 }
 
+# Print a human-readable rekey interval label or "Disabled".
 rekey_state() {
   local seconds=$1
   if [[ -z "$seconds" || "$seconds" == "0" || "$seconds" == "disabled" || "$seconds" == "Disabled" ]]; then
@@ -2445,6 +2521,7 @@ rekey_state() {
   fi
 }
 
+# Normalize a rekey value to "0" for disabled or the numeric value otherwise.
 normalize_rekey() {
   local value=$1
   if [[ -z "$value" || "$value" == "0" || "$value" == "disabled" || "$value" == "Disabled" ]]; then
@@ -2454,6 +2531,7 @@ normalize_rekey() {
   fi
 }
 
+# Normalize a minimum-data-rate mode string to "auto" or "manual".
 normalize_minrate_mode() {
   local value
   value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
@@ -2464,6 +2542,7 @@ normalize_minrate_mode() {
   esac
 }
 
+# Print the display label ("Auto" or "Manual") for a minimum-data-rate mode.
 minrate_mode_state() {
   case "$(normalize_minrate_mode "$1")" in
   auto) echo "Auto" ;;
@@ -2472,6 +2551,7 @@ minrate_mode_state() {
   esac
 }
 
+# Normalize a DTIM mode string to "default" or "custom".
 normalize_dtim_mode() {
   local value
   value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
@@ -2482,6 +2562,7 @@ normalize_dtim_mode() {
   esac
 }
 
+# Print the display label ("Default" or "Custom") for a DTIM mode.
 dtim_mode_state() {
   case "$(normalize_dtim_mode "$1")" in
   default) echo "Default" ;;
@@ -2490,6 +2571,7 @@ dtim_mode_state() {
   esac
 }
 
+# Print a green/red compliance line comparing current and expected minimum-rate mode.
 print_general_check_minrate_mode() {
   local current=$1 expected=$2
   local current_norm expected_norm current_state expected_state
@@ -2506,6 +2588,7 @@ print_general_check_minrate_mode() {
   fi
 }
 
+# Print a green/red compliance line comparing current and expected DTIM mode.
 print_general_check_dtim_mode() {
   local current=$1 expected=$2
   local current_norm expected_norm current_state expected_state
@@ -2522,17 +2605,20 @@ print_general_check_dtim_mode() {
   fi
 }
 
+# Print the parsed profile row for a given profile name from the profiles TSV.
 get_profile_row() {
   local profile=$1
   awk -F '\t' -v profile="$profile" '$1 == profile { print; exit }' "$PROFILES_TSV"
 }
 
+# Print the parsed WLAN row for a given site and WLAN name.
 get_site_wlan_row() {
   # site selects the TSV file (one file per site); the awk filter only needs wlan_name
   local site=$1 wlan_name=$2
   awk -F "$WLAN_FIELD_SEP" -v wlan_name="$wlan_name" '$1 == wlan_name { print; exit }' "$(site_wlans_tsv_path "$site")"
 }
 
+# Print the top-of-report banner with the tool name and current timestamp.
 print_header() {
   local title
   title="UniFi WiFi Optimizer - $(date +'%Y-%m-%d %H:%M:%S %Z')"
@@ -2543,6 +2629,7 @@ print_header() {
   echo
 }
 
+# Print a per-AP section header with AP name, MAC, and optional model.
 print_ap_header() {
   local ap=$1 mac=$2 model=${3:-}
   local ap_display=$ap
@@ -2554,6 +2641,7 @@ print_ap_header() {
   echo
 }
 
+# Print a per-site section header line with the site identifier.
 print_site_header() {
   local site=$1
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2562,6 +2650,7 @@ print_site_header() {
   echo
 }
 
+# Print the RF environment section header.
 print_environment_header() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   printf '  %sEnvironment%s\n' "$CYAN" "$RESET"
@@ -2569,6 +2658,7 @@ print_environment_header() {
   echo
 }
 
+# Print the adjacency-groups section header.
 print_group_summary_header() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   printf '  %sAdjacency Groups%s\n' "$CYAN" "$RESET"
@@ -2576,6 +2666,7 @@ print_group_summary_header() {
   echo
 }
 
+# Print a per-WLAN section header with WLAN name and matching profile.
 print_wlan_header() {
   local wlan_name=$1 profile_name=$2
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2585,11 +2676,13 @@ print_wlan_header() {
   echo
 }
 
+# Print a subgroup header line for a general-checks section.
 print_general_group_header() {
   local title=$1
   printf "  %s\n" "$title"
 }
 
+# Print the current band, channel width, channel and TX power for a radio.
 print_channel_info() {
   local band=$1 ht=$2 channel=$3 tx=$4 dfs_enabled=${5:-}
   local channel_label=$channel
@@ -2599,10 +2692,12 @@ print_channel_info() {
   echo
 }
 
+# Print the column header for the neighbor-RSSI table.
 print_neighbor_header() {
   printf "  %-15s  %s\n" "Neighbor AP:" "RSSI @ Neighbor:"
 }
 
+# Print a single neighbor's RSSI row, with an optional warning marker.
 print_neighbor_row() {
   local peer=$1 rssi=$2 marker=${3:-}
   local rssi_str="${rssi} dBm"
@@ -2610,13 +2705,16 @@ print_neighbor_row() {
   printf "  %-14s  %s\n" "$peer" "$rssi_str"
 }
 
+# Print the header for the per-radio recommendations block.
 print_recommendations_header() {
   echo
   echo "  Recommendations:"
 }
 
+# Mark the current run as having pending changes to report at the end.
 flag_change() { has_changes=true; }
 
+# Print a green/red compliance line for a boolean setting.
 print_general_check_bool() {
   local label=$1 expected=$2 current=$3
   local expected_state actual_state
@@ -2632,6 +2730,7 @@ print_general_check_bool() {
   fi
 }
 
+# Print a green/red compliance line for a minimum data rate value.
 print_general_check_rate() {
   local label=$1 expected_kbps=$2 current_enabled=$3 current_kbps=$4
   local expected_mbps current_mbps
@@ -2654,6 +2753,7 @@ print_general_check_rate() {
   fi
 }
 
+# Print a green/red compliance line for a generic scalar setting.
 print_general_check_value() {
   local label=$1 expected=$2 current=$3 suffix=${4:-}
 
@@ -2666,6 +2766,7 @@ print_general_check_value() {
   fi
 }
 
+# Print a green/red compliance line for a security protocol setting.
 print_general_check_protocol() {
   local label=$1 allowed=$2 current=$3
   local expected_state
@@ -2680,6 +2781,7 @@ print_general_check_protocol() {
   fi
 }
 
+# Print a green/red compliance line for the enabled WiFi bands.
 print_general_check_bands() {
   local label=$1 expected=$2 actual=$3
   local expected_state actual_state
@@ -2695,6 +2797,7 @@ print_general_check_bands() {
   fi
 }
 
+# Print a green/red compliance line for the group rekey interval.
 print_general_check_rekey() {
   local label=$1 expected=$2 current=$3
   local expected_state current_state expected_norm current_norm
@@ -2712,6 +2815,7 @@ print_general_check_rekey() {
   fi
 }
 
+# Print a red compliance line for a setting that is missing or not evaluable.
 print_general_check_missing() {
   local label=$1 expected=$2
   flag_change
@@ -2742,6 +2846,7 @@ print_tx_pending_note() {
     "$pending" "$plural"
 }
 
+# Print the Roaming Assistant compliance line for a WLAN, using cached aggregate data.
 print_general_check_roaming_assistant() {
   local site=$1 wlan_name=$2 na_enabled=$3 na_rssi=$4 actual_wifi_bands=$5 expected_roaming_assistant=$6
   local label="Roaming Assistant"
@@ -2819,6 +2924,7 @@ print_general_check_roaming_assistant() {
   done < <(awk -F '\t' -v w="$wlan_name" '$1 == w { print }' "$(roaming_detail_tsv_path "$site")")
 }
 
+# Print all WLAN-level general compliance checks for a site.
 print_general_checks() {
   local site=$1
   local matched=false
@@ -3022,6 +3128,7 @@ print_rec_min_rssi() {
   fi
 }
 
+# Print the per-radio Interference Blocker recommendation line.
 print_rec_interference_blocker() {
   local enabled=$1
   local label="Interference Blocker"
@@ -3055,6 +3162,7 @@ print_rec_roaming() {
   fi
 }
 
+# Print the per-radio Channel Layout recommendation line.
 print_rec_channel_layout() {
   local overlapping_peers=$1
   local label="Channel Layout"
@@ -3067,6 +3175,7 @@ print_rec_channel_layout() {
   fi
 }
 
+# Print the end-of-report footer with re-run and DFS CAC notes when applicable.
 print_footer() {
   local has_changes=$1
   local has_active_dfs_cac=${2:-false}
@@ -3083,6 +3192,7 @@ print_footer() {
   echo
 }
 
+# Print a hint explaining why no neighbor data was found, when the channel is DFS.
 print_no_neighbor_note() {
   local channel=$1 dfs_enabled=$2 cac_state=$3
 
@@ -3101,6 +3211,7 @@ print_no_neighbor_note() {
   esac
 }
 
+# Print channel-overlap, width-budget, and missing-sighting issues for adjacency groups.
 print_group_issues() {
   local site=$1
   local section_printed=false
@@ -3242,6 +3353,7 @@ print_group_issues() {
   done < <(list_site_groups "$site")
 }
 
+# Analyze one band on one AP: print neighbors, warnings and per-radio recommendations.
 analyze_band() {
   local band_label=$1 band_key=$2 scan_prefix=$3 mac=$4 ht=$5 channel=$6 tx=$7 min_tx=$8 max_tx=$9
   local txmode=${10} min_rssi=${11} min_rssi_enabled=${12} ib_enabled=${13} dfs_enabled=${14} cac_state=${15} include_roaming=${16}
@@ -3465,6 +3577,7 @@ analyze_band() {
   fi
 }
 
+# Return the tmpdir path prefix used for a site's AP-specific scan cache files.
 ap_scan_prefix() {
   local site=$1 ap=$2
   printf "%s/%s__%s" "$tmpdir" "$(sanitize_token "$site")" "$(sanitize_token "$ap")"
@@ -3474,6 +3587,7 @@ ap_scan_prefix() {
 # Main
 # ============================================================================
 
+# Parse CLI arguments and drive the full scan-analyze-report workflow.
 main() {
   validate_roam_constants
 

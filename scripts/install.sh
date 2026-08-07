@@ -15,6 +15,7 @@ PROMPT_INPUT="${PROMPT_INPUT:-/dev/tty}"
 PROMPT_OUTPUT="${PROMPT_OUTPUT:-/dev/tty}"
 INTERACTIVE_SETUP="${INTERACTIVE_SETUP:-auto}"
 
+# Abort with an error if the given command is not on PATH.
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     printf 'ERROR: Missing required command: %s\n' "$1" >&2
@@ -22,6 +23,7 @@ require_command() {
   fi
 }
 
+# Download a file from the repo raw base URL to the given destination path.
 download_file() {
   src_path="$1"
   dest_path="$2"
@@ -39,18 +41,22 @@ require_command sed
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 
+# Return success if the configured prompt input and output paths are usable.
 has_prompt_io() {
   [ -r "$PROMPT_INPUT" ] && [ -w "$PROMPT_OUTPUT" ]
 }
 
+# Write text to the prompt output stream without a trailing newline.
 tty_print() {
   printf '%s' "$1" >>"$PROMPT_OUTPUT"
 }
 
+# Write a line of text to the prompt output stream.
 tty_println() {
   printf '%s\n' "$1" >>"$PROMPT_OUTPUT"
 }
 
+# Prompt the user for a single line and echo the entered value or the default.
 prompt_line() {
   prompt="$1"
   default_value="${2:-}"
@@ -69,6 +75,7 @@ prompt_line() {
   printf '%s' "$answer"
 }
 
+# Prompt the user for a secret value with terminal echo disabled when possible.
 prompt_secret() {
   prompt="$1"
   answer=""
@@ -85,6 +92,7 @@ prompt_secret() {
   printf '%s' "$answer"
 }
 
+# Prompt the user for a yes/no answer and return 0 for yes or 1 for no.
 prompt_yes_no() {
   prompt="$1"
   default_answer="${2:-n}"
@@ -103,6 +111,7 @@ prompt_yes_no() {
   esac
 }
 
+# Write a minimal controller-only config.yaml with the given URL and API key.
 write_controller_config() {
   controller_url="$1"
   controller_api_key="$2"
@@ -117,6 +126,7 @@ controller:
 EOF
 }
 
+# Copy an existing config file to a timestamped backup when one is present.
 backup_config_if_present() {
   config_path="$1"
   if [ -f "$config_path" ]; then
@@ -126,6 +136,7 @@ backup_config_if_present() {
   fi
 }
 
+# Print the default SSH user parsed from a generated site skeleton file.
 extract_default_ssh_user() {
   skeleton_path="$1"
   python3 - "$skeleton_path" <<'PY'
@@ -141,6 +152,7 @@ with open(path, "r", encoding="utf-8") as handle:
 PY
 }
 
+# Print the access-point names listed in a generated site skeleton file.
 extract_ap_names() {
   skeleton_path="$1"
   python3 - "$skeleton_path" <<'PY'
@@ -162,6 +174,7 @@ with open(path, "r", encoding="utf-8") as handle:
 PY
 }
 
+# Rewrite a site skeleton in place with the given SSH credentials and neighbor lists.
 edit_site_skeleton() {
   skeleton_path="$1"
   ssh_user="$2"
@@ -230,6 +243,7 @@ with open(skeleton_path, "w", encoding="utf-8") as handle:
 PY
 }
 
+# Guide the user through creating controller and site configuration interactively.
 run_optional_setup() {
   config_path="$INSTALL_ROOT/config.yaml"
   controller_url=""
