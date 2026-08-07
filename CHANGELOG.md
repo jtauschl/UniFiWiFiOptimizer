@@ -22,6 +22,9 @@ the version's goal, not a status recap or an approach detail).
 - `tests/roaming_test.sh`, `tests/tx_test.sh`, run automatically by `./dev ci`.
 - `.github/dependabot.yml` (github-actions weekly). Note: Dependabot reads the config only from the default branch, so it becomes active after this release branch is fast-forward-promoted to `main`.
 - Doc-comments on every Top-Level Bash function in `unifiwifioptimizer` and `scripts/install.sh` (sw_dev_handbook v0.9.1).
+- Advisory line when a WLAN's 2.4 GHz minimum data rate is below 12 Mbps — 11 Mbps and lower are 802.11b DSSS rates and keep the 802.11b protection overhead active for every OFDM frame on the SSID. Independent of the profile-vs-actual comparison; also fires when no profile is matched.
+- Advisory line when 802.11r Fast Transition is enabled on a WLAN whose matched profile is `IoT`. 802.11r is known to break specific IoT client classes (ESP32, older printers, Sonos gen1); the tool now points at splitting IoT off to its own SSID with 11r disabled, or relying on 802.11v alone.
+- Scope statement at the end of every run: this tool works from controller configuration and AP-to-AP neighbor scans, and cannot see non-WiFi RF interference, per-client MCS or retry statistics, real roaming timing, or packet captures. Prevents the tool from being oversold as a spectrum-analysis or client-telemetry equivalent.
 
 ### Changed
 - `sw_dev_handbook` pin bumped from v0.10.4 to v0.10.5.

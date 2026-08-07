@@ -2790,6 +2790,7 @@ print_general_check_rate() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
       "$label" "$expected_mbps"
+    print_min_rate_dsss_advisory "$label" "${current_kbps:-0}" "$current_enabled"
     return
   fi
 
@@ -2799,6 +2800,22 @@ print_general_check_rate() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
       "$label" "$expected_mbps"
+  fi
+  print_min_rate_dsss_advisory "$label" "${current_kbps:-0}" "$current_enabled"
+}
+
+# Advisory: a 2.4 GHz minimum below 12 Mbps still allows 802.11b clients to
+# associate and keeps 802.11b protection overhead active for every OFDM frame
+# on the SSID. Silent for 5 GHz (has no 802.11b rates) and for disabled
+# minimum-rate mode with a zero current value (nothing meaningful to compare).
+print_min_rate_dsss_advisory() {
+  local label=$1 current_kbps=$2 current_enabled=$3
+  [[ "$label" != *"2.4 GHz"* ]] && return
+  [[ -z "$current_kbps" || "$current_kbps" == "0" ]] && return
+  is_true "$current_enabled" || return
+  if ((current_kbps < 12000)); then
+    printf "  ${YELLOW}    ! %s is an 802.11b DSSS rate — kills 802.11b support and cuts broadcast airtime by raising to 12000 kbps (12 Mbps, lowest OFDM rate).${RESET}\n" \
+      "$(rate_mbps "$current_kbps") Mbps"
   fi
 }
 
@@ -2886,6 +2903,23 @@ print_tx_pending_note() {
   ((pending != 1)) && plural="s"
   printf "  ${YELLOW}    Note: %s access point%s on this site still have a pending TX power recommendation — apply those first, then re-run; a missing sighting is often caused by TX power being too low to reach a neighbor.${RESET}\n" \
     "$pending" "$plural"
+}
+
+# Advisory: 802.11r (Fast Transition) is known to break specific IoT client
+# classes -- some ESP32, older printers, Sonos gen1. Heuristic for "this WLAN
+# is IoT-serving": profile name is IoT OR the WLAN broadcasts only on 2.4 GHz
+# and profile name is Standard-family. Silent when Fast Roaming is off or the
+# profile is one of the recommendation profiles (Throughput/Latency) which
+# expect it on.
+print_fast_roaming_iot_advisory() {
+  local profile=$1 actual_wifi_bands=$2 fast_roaming=$3
+  is_true "$fast_roaming" || return
+  case "$profile" in
+  IoT)
+    printf "  ${YELLOW}    ! %s${RESET}\n" \
+      "802.11r Fast Transition is known to break some IoT clients (ESP32, older printers, Sonos gen1) — consider splitting IoT off to its own SSID with 802.11r disabled, or rely on BSS Transition (802.11v) alone."
+    ;;
+  esac
 }
 
 # Roaming Assistant compliance check (ALGORITHM.md §7). Compares the WLAN's
@@ -3062,6 +3096,7 @@ print_general_checks() {
     echo
     print_general_group_header "  Roaming Assistance:"
     print_general_check_bool "Fast Roaming" "$expected_fast_roaming" "$fast_roaming"
+    print_fast_roaming_iot_advisory "$profile" "$actual_wifi_bands" "$fast_roaming"
     print_general_check_roaming_assistant "$site" "$wlan_name" "$roaming_assistant_na_enabled" "$roaming_assistant_na_rssi" "$actual_wifi_bands" "$expected_roaming_assistant"
 
     echo
@@ -3247,7 +3282,21 @@ print_footer() {
     printf "  Wait until all affected access points have activated the channel\n"
     printf "  before re-running.%s\n" "$RESET"
   fi
+  print_scope_note
   echo
+}
+
+# Print the scope statement -- what this tool cannot verify. Once per run,
+# regardless of pending changes. Aligns with the WLAN-Pros community norm
+# to state a tool's scope explicitly rather than let it be oversold as a
+# spectrum-analysis or client-telemetry equivalent.
+print_scope_note() {
+  echo
+  printf "  %sScope note:%s this tool works from UniFi controller configuration\n" "$CYAN" "$RESET"
+  printf "  and AP-to-AP neighbor scans. It cannot see non-WiFi RF interference\n"
+  printf "  (BLE/Zigbee/microwave -- needs a spectrum analyzer), per-client MCS\n"
+  printf "  or retry statistics, real client roaming timing, or packet captures.\n"
+  printf "  Recommendations are static-analysis heuristics, not runtime KPIs.\n"
 }
 
 # Print a hint explaining why no neighbor data was found, when the channel is DFS.
