@@ -8,10 +8,10 @@ CMD_NAME="${CMD_NAME:-unifiwifioptimizer}"
 UNINSTALL_NAME="${UNINSTALL_NAME:-unifiwifioptimizer-uninstall}"
 
 case "$INSTALL_ROOT" in
-  ""|"/"|"$HOME"|".")
-    printf 'ERROR: Refusing unsafe INSTALL_ROOT: %s\n' "$INSTALL_ROOT" >&2
-    exit 1
-    ;;
+"" | "/" | "$HOME" | ".")
+  printf 'ERROR: Refusing unsafe INSTALL_ROOT: %s\n' "$INSTALL_ROOT" >&2
+  exit 1
+  ;;
 esac
 
 rm -f "$BIN_DIR/$CMD_NAME" "$BIN_DIR/$UNINSTALL_NAME"

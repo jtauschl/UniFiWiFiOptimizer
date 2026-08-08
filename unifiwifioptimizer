@@ -2211,7 +2211,7 @@ security_protocol_state() {
 
 security_protocol_uses_sae() {
   case "$1" in
-  WPA3 | WPA2/WPA3) return 0 ;;
+  WPA3 | WPA2/WPA3 | "WPA3 Enterprise" | "WPA2/WPA3 Enterprise") return 0 ;;
   *) return 1 ;;
   esac
 }
