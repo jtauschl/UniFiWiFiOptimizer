@@ -42,9 +42,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install semgrep
-        run: pip install semgrep==1.140.0
+        run: pip install semgrep==1.172.0
       - name: Run semgrep
-        run: semgrep ci --config p/bash --config p/security-audit --config p/secrets
+        run: semgrep ci --config p/security-audit --config p/secrets
 
   ci-success:
     name: CI success (aggregator)

@@ -46,12 +46,13 @@ profiles:
     group_rekey: 3600
     ap_name_in_beacon: false
     roaming_assistant: true
+    band_steering: true
 ```
 
 ## Field Guide
 
 - `wifi_bands`: expected band availability
-- `fast_roaming`, `mlo`, `bss_transition`, `uapsd`: roaming and client behavior controls
+- `fast_roaming`, `mlo`, `bss_transition`, `uapsd`, `band_steering`: roaming and client behavior controls
 - `roaming_assistant`: whether Roaming Assistant / "Handoff Suggestions (802.11v)" should be enabled — a different mechanism from `fast_roaming` (802.11r) and `bss_transition` (802.11v protocol support itself); see `ALGORITHM.md` §7 "Enable/disable expectation". Only the on/off expectation is profile-driven — the RSSI threshold is always computed from the site's RF model, never from the profile.
 - `minrate_mode`, `minrate_*`: minimum data rate mode and per-band values
 - `dtim_mode`, `dtim_*`: DTIM mode and per-band DTIM values
@@ -67,7 +68,7 @@ profiles:
 - `minrate_*` and `dtim_*` only apply to bands listed in `wifi_bands`
 - `group_rekey: 0` renders as `Disabled`
 - `mlo: false` is the shipped default for all current profiles
-- Configure `Band Steering` manually in UniFi Network to match your deployment policy.
+- `band_steering` (controller field `no2ghz_oui`): live-verified 2026-08-08 against a real controller -- `true` for `Standard`/`Hotspot`/`Throughput`/`Latency` matches the current UniFi preset default (steers dual-band clients toward 5 GHz). `false` for `IoT` is a deliberate deviation from that default: many IoT clients are 2.4-GHz-only.
 
 ## References
 

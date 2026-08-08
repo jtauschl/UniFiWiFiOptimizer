@@ -303,6 +303,7 @@ profile_fields = %w[
   group_rekey
   ap_name_in_beacon
   roaming_assistant
+  band_steering
 ]
 
 profiles.each do |name, values|
@@ -577,6 +578,7 @@ try:
             wlan.get('roaming_assistant_na_rssi', ''),
             wlan.get('ap_group_mode', ''),
             '|'.join(wlan.get('ap_group_ids', []) or []),
+            wlan.get('no2ghz_oui', ''),
         ]
         print(sep.join(str(field).replace(sep, ' ') for field in fields))
 except Exception:
@@ -2143,7 +2145,7 @@ prepare_site_roaming_checks() {
       _dn _de _dbt _dfr _dmm _d24e _d24 _d5e _d5 _dbc _dme _dpa \
       _dwb _dwbs _dmlo _dsec _dwm _dw3s _dw3t _dpmf _dhs _dl2 \
       _dsac _dss _duap _ddm _dd24 _dd5 _dd6 _dgr _dabb \
-      _detect_na_enabled _detect_na_rssi _dgm _dgi; do
+      _detect_na_enabled _detect_na_rssi _dgm _dgi _; do
       if [[ -n "$_detect_na_enabled" || -n "$_detect_na_rssi" ]]; then
         : >>"$(roaming_field_present_flag_path "$site")"
         break
@@ -2180,7 +2182,7 @@ prepare_site_roaming_checks() {
       _hide_ssid _l2_isolation _sae_anti_clogging _sae_sync _uapsd \
       _dtim_mode \
       _dtim24 _dtim5 _dtim6 _group_rekey _ap_name_in_beacon \
-      na_enabled na_rssi _group_mode ap_group_ids_field <<<"$wlan_row"
+      na_enabled na_rssi _group_mode ap_group_ids_field _ <<<"$wlan_row"
 
     # A WLAN without the new SSID-level field (older controller/API) cannot
     # be evaluated on this path -- the site-wide fallback decision itself
@@ -2462,7 +2464,11 @@ security_protocol_state() {
   wpaeap | wpa-enterprise | enterprise) enterprise=true ;;
   esac
 
-  if [[ "$security" == "open" ]]; then
+  if [[ "$security" == "open" ]] && is_true "$wpa3_support" && is_true "$wpa3_transition"; then
+    echo "Enhanced Open with Transition"
+  elif [[ "$security" == "open" ]] && is_true "$wpa3_support"; then
+    echo "Enhanced Open (OWE)"
+  elif [[ "$security" == "open" ]]; then
     echo "Open"
   elif [[ "$enterprise" == "true" ]] && is_true "$wpa3_support" && is_true "$wpa3_transition"; then
     echo "WPA2/WPA3 Enterprise"
@@ -2484,7 +2490,15 @@ security_protocol_state() {
 # Return success if the security protocol name uses SAE (WPA3 family).
 security_protocol_uses_sae() {
   case "$1" in
-  WPA3 | WPA2/WPA3) return 0 ;;
+  WPA3 | WPA2/WPA3 | "WPA3 Enterprise" | "WPA2/WPA3 Enterprise") return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Return success if the security protocol name is an OWE (Enhanced Open) variant.
+security_protocol_uses_owe() {
+  case "$1" in
+  "Enhanced Open (OWE)" | "Enhanced Open with Transition") return 0 ;;
   *) return 1 ;;
   esac
 }
@@ -2634,6 +2648,7 @@ print_general_check_minrate_mode() {
   else
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "Minimum Data Rate Mode" "$expected_state"
+    print_ui_path_hint "Minimum Data Rate Mode"
   fi
 }
 
@@ -2651,6 +2666,7 @@ print_general_check_dtim_mode() {
   else
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "DTIM Mode" "$expected_state"
+    print_ui_path_hint "DTIM Mode"
   fi
 }
 
@@ -2763,6 +2779,47 @@ print_recommendations_header() {
 # Mark the current run as having pending changes to report at the end.
 flag_change() { has_changes=true; }
 
+# Print where in the UniFi UI a given WLAN-level check's setting lives, so a
+# ✗ line is immediately actionable instead of requiring the user to hunt for
+# it. Looked up by the check's report label -- labels are unique per check
+# and stable, so this avoids threading a separate identifier through every
+# print_general_check_* call site. Silent (no line printed) for labels with
+# no known UI path, rather than printing a guess.
+print_ui_path_hint() {
+  local label=$1
+  local path=""
+  case "$label" in
+  "WiFi Band") path="WLAN edit → Radio Band checkboxes (above Advanced)" ;;
+  "Fast Roaming") path="WLAN edit → Advanced → Roaming Assistance → Fast Roaming (802.11r)" ;;
+  "Minimum Data Rate Mode") path="WLAN edit → Advanced → Hi-Capacity Tuning → Minimum Data Rate (Basic & Multicast)" ;;
+  "Minimum Data Rate 2.4 GHz") path="WLAN edit → Advanced → Hi-Capacity Tuning → Minimum Data Rate → 2.4 GHz slider" ;;
+  "Minimum Data Rate 5 GHz") path="WLAN edit → Advanced → Hi-Capacity Tuning → Minimum Data Rate → 5 GHz slider" ;;
+  "Multicast and Broadcast Blocker") path="WLAN edit → Advanced → Hi-Capacity Tuning → Multicast and Broadcast Blocker" ;;
+  "Multicast to Unicast") path="WLAN edit → Advanced → Hi-Capacity Tuning → Multicast to Unicast" ;;
+  "Proxy ARP") path="WLAN edit → Advanced → Hi-Capacity Tuning → Proxy ARP" ;;
+  "Security Protocol") path="WLAN edit → Security Protocol dropdown (above Advanced)" ;;
+  "PMF") path="WLAN edit → Advanced → Security → PMF" ;;
+  "Hide WiFi Name") path="WLAN edit → Advanced → Security → Hide WiFi Name" ;;
+  "Client Device Isolation") path="WLAN edit → Advanced → Security → Client Device Isolation" ;;
+  "SAE Anti-clogging") path="WLAN edit → Advanced → Security → SAE Anti-clogging" ;;
+  "SAE Sync Time") path="WLAN edit → Advanced → Security → SAE Sync Time" ;;
+  "MLO") path="WLAN edit → Advanced → Behavior Controls → MLO (note: toggling MLO also silently sets PMF Required, drops WPA2 fallback, and disables Fast Roaming -- verify those three afterward)" ;;
+  "Band Steering") path="WLAN edit → Advanced → Behavior Controls → Band Steering" ;;
+  "BSS Transition") path="WLAN edit → Advanced → Behavior Controls → BSS Transition" ;;
+  "UAPSD") path="WLAN edit → Advanced → Behavior Controls → UAPSD" ;;
+  "DTIM Mode") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period" ;;
+  "DTIM Period 2.4 GHz") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period → 2.4 GHz field" ;;
+  "DTIM Period 5 GHz") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period → 5 GHz field" ;;
+  "Group Rekey Interval") path="WLAN edit → Advanced → Behavior Controls → Group Rekey Interval" ;;
+  "Show Access Point Name in Beacon") path="WLAN edit → Advanced → Behavior Controls → Show Access Point Name in Beacon" ;;
+  "Roaming Assistant") path="WLAN edit → Advanced → Roaming Assistance → Handoff Suggestions (802.11v)" ;;
+  "Channel Layout") path="AP settings → Radios → Channel dropdown (2.4/5 GHz)" ;;
+  "Transmit Power") path="AP settings → Radios → Transmit Power (2.4/5 GHz) -- set to Custom, then the dBm field" ;;
+  "Minimum RSSI") path="AP settings → Radios → Minimum RSSI checkbox (2.4/5 GHz)" ;;
+  esac
+  [[ -n "$path" ]] && printf "  ${YELLOW}    → %s${RESET}\n" "$path"
+}
+
 # Print a green/red compliance line for a boolean setting.
 print_general_check_bool() {
   local label=$1 expected=$2 current=$3
@@ -2776,6 +2833,7 @@ print_general_check_bool() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
       "$label" "$expected_state"
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -2790,6 +2848,7 @@ print_general_check_rate() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
       "$label" "$expected_mbps"
+    print_ui_path_hint "$label"
     print_min_rate_dsss_advisory "$label" "${current_kbps:-0}" "$current_enabled"
     return
   fi
@@ -2800,6 +2859,7 @@ print_general_check_rate() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
       "$label" "$expected_mbps"
+    print_ui_path_hint "$label"
   fi
   print_min_rate_dsss_advisory "$label" "${current_kbps:-0}" "$current_enabled"
 }
@@ -2808,13 +2868,24 @@ print_general_check_rate() {
 # associate and keeps 802.11b protection overhead active for every OFDM frame
 # on the SSID. Silent for 5 GHz (has no 802.11b rates) and for disabled
 # minimum-rate mode with a zero current value (nothing meaningful to compare).
+# 802.11b DSSS rates are 1/2/5.5/11 Mbps specifically; 6 and 9 Mbps are
+# 802.11a/g OFDM rates that are still below the 12 Mbps recommendation but
+# don't themselves admit 802.11b clients, so the wording differs.
 print_min_rate_dsss_advisory() {
   local label=$1 current_kbps=$2 current_enabled=$3
-  [[ "$label" != *"2.4 GHz"* ]] && return
-  [[ -z "$current_kbps" || "$current_kbps" == "0" ]] && return
-  is_true "$current_enabled" || return
-  if ((current_kbps < 12000)); then
+  [[ "$label" != *"2.4 GHz"* ]] && return 0
+  [[ -z "$current_kbps" || "$current_kbps" == "0" ]] && return 0
+  is_true "$current_enabled" || return 0
+  case "$current_kbps" in
+  1000 | 2000 | 5500 | 11000)
     printf "  ${YELLOW}    ! %s is an 802.11b DSSS rate — kills 802.11b support and cuts broadcast airtime by raising to 12000 kbps (12 Mbps, lowest OFDM rate).${RESET}\n" \
+      "$(rate_mbps "$current_kbps") Mbps"
+    return 0
+    ;;
+  esac
+
+  if ((current_kbps < 12000)); then
+    printf "  ${YELLOW}    ! %s is below the 12 Mbps recommendation — raising to 12000 kbps cuts broadcast airtime, though this rate doesn't itself admit 802.11b clients.${RESET}\n" \
       "$(rate_mbps "$current_kbps") Mbps"
   fi
 }
@@ -2829,6 +2900,7 @@ print_general_check_value() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s%s${RESET}\n" \
       "$label" "$expected" "$suffix"
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -2844,6 +2916,7 @@ print_general_check_protocol() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
       "$label" "$expected_state"
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -2860,6 +2933,7 @@ print_general_check_bands() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
       "$label" "$expected_state"
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -2878,6 +2952,7 @@ print_general_check_rekey() {
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" \
       "$label" "$expected_state"
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -2905,6 +2980,53 @@ print_tx_pending_note() {
     "$pending" "$plural"
 }
 
+# Advisory: MLO mandates WPA3 (PSK or Enterprise) + PMF Required by spec --
+# OWE is not a valid substitute for MLO's client authentication requirement.
+# The 6 GHz band mandates PMF Required too, but accepts either WPA3 or OWE
+# (Enhanced Open), since 6 GHz permits open/encrypted networks via OWE.
+# Checked against the WLAN's actual controller configuration, not its
+# matched profile -- this is a protocol-level consistency rule, not a
+# profile compliance check.
+print_wpa3_pmf_required_advisory() {
+  local mlo=$1 actual_wifi_bands=$2 actual_security_protocol=$3 actual_pmf=$4
+  local reason="" security_ok=false
+
+  if is_true "$mlo"; then
+    reason="MLO"
+    security_protocol_uses_sae "$actual_security_protocol" && security_ok=true
+  elif wifi_band_includes "$actual_wifi_bands" "6g"; then
+    reason="the 6 GHz band"
+    if security_protocol_uses_sae "$actual_security_protocol" || security_protocol_uses_owe "$actual_security_protocol"; then
+      security_ok=true
+    fi
+  else
+    return 0
+  fi
+
+  if [[ "$security_ok" != "true" || "$actual_pmf" != "Required" ]]; then
+    printf "  ${YELLOW}    ! %s${RESET}\n" \
+      "${reason} requires WPA3 (or OWE on 6 GHz) + PMF Required by spec — current: ${actual_security_protocol}/${actual_pmf}."
+  fi
+}
+
+# Advisory: 802.11r (Fast Transition) is only effective as a fast, seamless
+# handoff when paired with 802.11v (BSS Transition Management, already
+# tracked separately as bss_transition). 802.11k (Radio Resource Management)
+# is not included here -- UniFi exposes no UI control for it on either the
+# WLAN or the AP, live-verified 2026-08-08, so a warning about it would not
+# be actionable.
+# Checked against the WLAN's actual controller configuration, not its
+# matched profile.
+print_fast_roaming_bss_transition_advisory() {
+  local fast_roaming=$1 bss_transition=$2
+
+  is_true "$fast_roaming" || return 0
+  is_true "$bss_transition" && return 0
+
+  printf "  ${YELLOW}    ! %s${RESET}\n" \
+    "802.11r Fast Transition works best paired with 802.11v (BSS Transition) — currently disabled."
+}
+
 # Advisory: 802.11r (Fast Transition) is known to break specific IoT client
 # classes -- some ESP32, older printers, Sonos gen1. Heuristic for "this WLAN
 # is IoT-serving": profile name is IoT OR the WLAN broadcasts only on 2.4 GHz
@@ -2913,7 +3035,7 @@ print_tx_pending_note() {
 # expect it on.
 print_fast_roaming_iot_advisory() {
   local profile=$1 actual_wifi_bands=$2 fast_roaming=$3
-  is_true "$fast_roaming" || return
+  is_true "$fast_roaming" || return 0
   case "$profile" in
   IoT)
     printf "  ${YELLOW}    ! %s${RESET}\n" \
@@ -2961,6 +3083,7 @@ print_general_check_roaming_assistant() {
     else
       flag_change
       printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s${RESET}\n" "$label" "Enabled, but profile expects disabled"
+      print_ui_path_hint "$label"
     fi
     return
   fi
@@ -2993,6 +3116,7 @@ print_general_check_roaming_assistant() {
   if ! is_true "$na_enabled" || [[ -z "$na_rssi" ]] || ((na_rssi != aggregated_rssi)); then
     flag_change
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s Enabled, %s dBm${RESET}\n" "$label" "$aggregated_rssi"
+    print_ui_path_hint "$label"
   else
     printf "  ${GREEN}  ✓ %-${GENERAL_LABEL_WIDTH}s Enabled, %s dBm${RESET}\n" "$label" "$na_rssi"
   fi
@@ -3026,14 +3150,14 @@ print_general_checks() {
   local bc_filter mcast_enhance proxy_arp
   local wlan_band wlan_bands mlo security wpa_mode wpa3_support wpa3_transition pmf
   local hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd
-  local dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon
+  local dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon band_steering
   local roaming_assistant_na_enabled roaming_assistant_na_rssi
   local profile expected_wifi_bands expected_mlo expected_fast_roaming expected_minrate_mode expected_minrate24 expected_minrate5
   local expected_bc_filter expected_mcast_enhance expected_proxy_arp
   local expected_security_protocols expected_pmf expected_hide_wifi_name
   local expected_client_device_isolation expected_sae_anti_clogging expected_sae_sync_time
   local expected_bss_transition expected_uapsd expected_dtim_mode expected_dtim24 expected_dtim5 expected_dtim6
-  local expected_group_rekey expected_ap_name_in_beacon expected_roaming_assistant
+  local expected_group_rekey expected_ap_name_in_beacon expected_roaming_assistant expected_band_steering
   local actual_wifi_bands actual_security_protocol actual_pmf
   local current_site wlan_name profile_name
 
@@ -3063,7 +3187,8 @@ print_general_checks() {
       hide_ssid l2_isolation sae_anti_clogging sae_sync uapsd \
       dtim_mode \
       dtim24 dtim5 dtim6 group_rekey ap_name_in_beacon \
-      roaming_assistant_na_enabled roaming_assistant_na_rssi _ap_group_mode _ap_group_ids <<<"$actual_row"
+      roaming_assistant_na_enabled roaming_assistant_na_rssi _ap_group_mode _ap_group_ids \
+      band_steering <<<"$actual_row"
 
     if ! is_true "$enabled"; then
       print_general_check_missing "WLAN Enabled" "Enabled"
@@ -3084,7 +3209,8 @@ print_general_checks() {
       expected_security_protocols expected_pmf expected_hide_wifi_name \
       expected_client_device_isolation expected_sae_anti_clogging expected_sae_sync_time \
       expected_bss_transition expected_uapsd expected_dtim_mode expected_dtim24 expected_dtim5 expected_dtim6 \
-      expected_group_rekey expected_ap_name_in_beacon expected_roaming_assistant <<<"$profile_row"
+      expected_group_rekey expected_ap_name_in_beacon expected_roaming_assistant \
+      expected_band_steering <<<"$profile_row"
 
     actual_wifi_bands=$(normalize_wifi_bands "$wlan_band" "$wlan_bands")
     actual_security_protocol=$(security_protocol_state "$security" "$wpa_mode" "$wpa3_support" "$wpa3_transition")
@@ -3097,6 +3223,7 @@ print_general_checks() {
     print_general_group_header "  Roaming Assistance:"
     print_general_check_bool "Fast Roaming" "$expected_fast_roaming" "$fast_roaming"
     print_fast_roaming_iot_advisory "$profile" "$actual_wifi_bands" "$fast_roaming"
+    print_fast_roaming_bss_transition_advisory "$fast_roaming" "$bss_transition"
     print_general_check_roaming_assistant "$site" "$wlan_name" "$roaming_assistant_na_enabled" "$roaming_assistant_na_rssi" "$actual_wifi_bands" "$expected_roaming_assistant"
 
     echo
@@ -3118,6 +3245,7 @@ print_general_checks() {
     print_general_group_header "  Security:"
     print_general_check_protocol "Security Protocol" "$expected_security_protocols" "$actual_security_protocol"
     print_general_check_value "PMF" "$expected_pmf" "$actual_pmf"
+    print_wpa3_pmf_required_advisory "$mlo" "$actual_wifi_bands" "$actual_security_protocol" "$actual_pmf"
     print_general_check_bool "Hide WiFi Name" "$expected_hide_wifi_name" "$hide_ssid"
     print_general_check_bool "Client Device Isolation" "$expected_client_device_isolation" "$l2_isolation"
     if security_protocol_uses_sae "$actual_security_protocol"; then
@@ -3128,6 +3256,7 @@ print_general_checks() {
     echo
     print_general_group_header "  Behaviour Controls:"
     print_general_check_bool "MLO" "$expected_mlo" "$mlo"
+    print_general_check_bool "Band Steering" "$expected_band_steering" "$band_steering"
     print_general_check_bool "BSS Transition" "$expected_bss_transition" "$bss_transition"
     print_general_check_bool "UAPSD" "$expected_uapsd" "$uapsd"
     print_general_check_dtim_mode "$dtim_mode" "$expected_dtim_mode"
@@ -3166,6 +3295,7 @@ print_rec_tx() {
       flag_change
       printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Custom, %d dBm${RESET}\n" "$label" "$current"
       printf "  ${RED}    ! TX Power Mode is \"%s\" - set to Custom first${RESET}\n" "$txmode"
+      print_ui_path_hint "$label"
     else
       printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Custom, %d dBm${RESET}\n" "$label" "$current"
     fi
@@ -3176,6 +3306,7 @@ print_rec_tx() {
     if [[ "$txmode" != "custom" ]]; then
       printf "  ${RED}    ! TX Power Mode is \"%s\" - set to Custom first${RESET}\n" "$txmode"
     fi
+    print_ui_path_hint "$label"
   fi
 }
 
@@ -3200,6 +3331,7 @@ print_rec_tx_zero_sightings() {
   if [[ "$txmode" != "custom" ]]; then
     printf "  ${RED}    ! TX Power Mode is \"%s\" - set to Custom first${RESET}\n" "$txmode"
   fi
+  print_ui_path_hint "$label"
   printf '  %s  If this AP is genuinely out of range of its configured neighbor(s), revert manually -- this recommendation cannot distinguish a temporary scan miss from a structurally unreachable neighbor.%s\n' "$YELLOW" "$RESET"
 }
 
@@ -3216,6 +3348,7 @@ print_rec_min_rssi() {
     else
       printf " ${RED}(if enabled %d dBm)${RESET}\n" "$recommended"
     fi
+    print_ui_path_hint "$label"
   else
     printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Disabled${RESET}\n" "$label"
   fi
@@ -3243,6 +3376,7 @@ print_rec_roaming() {
     flag_change
     printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" \
       "$label" "$recommended"
+    print_ui_path_hint "$label"
     return
   fi
 
@@ -3250,6 +3384,7 @@ print_rec_roaming() {
     flag_change
     printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" \
       "$label" "$recommended"
+    print_ui_path_hint "$label"
   else
     printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Enabled, %d dBm${RESET}\n" "$label" "$current_roam_rssi"
   fi
@@ -3263,6 +3398,7 @@ print_rec_channel_layout() {
   if [[ -n "$overlapping_peers" ]]; then
     flag_change
     printf "  ${RED}  ✗ %-${REC_LABEL_WIDTH}s Separate from %s${RESET}\n" "$label" "$overlapping_peers"
+    print_ui_path_hint "$label"
   else
     printf "  ${GREEN}  ✓ %-${REC_LABEL_WIDTH}s Non-overlapping${RESET}\n" "$label"
   fi

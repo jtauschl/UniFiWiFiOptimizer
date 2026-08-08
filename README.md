@@ -206,8 +206,6 @@ Profile presets:
 
 For profile details, see [docs/PROFILES.md](docs/PROFILES.md).
 
-Configure `Band Steering` manually in UniFi Network.
-
 `config.yaml` contains the API key and optionally the SSH password — protect it accordingly:
 
 ```bash

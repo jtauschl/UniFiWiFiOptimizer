@@ -116,6 +116,8 @@ prompt_yes_no() {
 }
 
 # Write a minimal controller-only config.yaml with the given URL and API key.
+# config.yaml holds a UniFi API key and optionally an SSH password, so it's
+# created with 0600 regardless of the caller's umask.
 write_controller_config() {
   controller_url="$1"
   controller_api_key="$2"
@@ -123,6 +125,8 @@ write_controller_config() {
   escaped_url=$(printf '%s' "$controller_url" | sed 's/\\/\\\\/g; s/"/\\"/g')
   escaped_api_key=$(printf '%s' "$controller_api_key" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
+  : >"$dest_path"
+  chmod 600 "$dest_path"
   cat >"$dest_path" <<EOF
 controller:
   url: "$escaped_url"
@@ -131,11 +135,13 @@ EOF
 }
 
 # Copy an existing config file to a timestamped backup when one is present.
+# -p preserves the source file's mode (0600), so the backup doesn't become
+# world-readable regardless of the caller's umask.
 backup_config_if_present() {
   config_path="$1"
   if [ -f "$config_path" ]; then
     backup_path="${config_path}.bak.$(date +%Y%m%d%H%M%S)"
-    cp "$config_path" "$backup_path"
+    cp -p "$config_path" "$backup_path"
     tty_println "Backed up existing config to $backup_path"
   fi
 }
@@ -416,6 +422,7 @@ chmod +x "$INSTALL_ROOT/unifiwifioptimizer" "$INSTALL_ROOT/scripts/install.sh" "
 
 if [ ! -f "$INSTALL_ROOT/config.yaml" ]; then
   cp "$INSTALL_ROOT/config.minimal.yaml" "$INSTALL_ROOT/config.yaml"
+  chmod 600 "$INSTALL_ROOT/config.yaml"
 fi
 
 cat >"$BIN_DIR/$CMD_NAME" <<EOF
