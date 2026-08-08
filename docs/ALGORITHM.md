@@ -94,7 +94,7 @@ Two distinct diagnoses are emitted per neighbor:
 
 - `*` **Coverage gap** — emitted when even at the radio's TX limit the projected RSSI stays below `TX_LO` (`tx_uncapped > radio_max_tx` and projected RSSI < `TX_LO`). This means TX adjustment cannot fix the situation; the AP placement, antenna orientation, or an additional AP needs to be considered.
 - `*` **Excess overlap** — emitted when even at the radio's TX minimum the projected RSSI stays above `TX_HI` (`tx_uncapped < radio_min_tx` and projected RSSI > `TX_HI`). Symmetric counterpart of the coverage gap.
-- `°` **Below corridor before TX adjustment** — emitted when the *raw* measured RSSI is below `TX_LO`, regardless of whether the TX recommendation can correct it. This is informational: the recommended TX shift may or may not lift the projected signal back into the corridor, and the Roaming Assistant cap (§7) reflects this neighbor as an input.
+- `°` **Below corridor before TX adjustment** — emitted when the *raw* measured RSSI is below `TX_LO`, but applying the recommended TX shift does lift the projected signal back into the corridor for this specific neighbor (checked individually, not just via the average used to derive the shift). This is informational, not a problem: the Roaming Assistant cap (§7) reflects this neighbor as an input. If the shift does *not* resolve it, the neighbor is reported as `*` Coverage gap instead.
 
 The `°` marker is suppressed for a neighbor that is already flagged with `*`, since the harder coverage-gap statement supersedes it.
 

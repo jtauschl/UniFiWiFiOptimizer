@@ -3151,26 +3151,32 @@ analyze_band() {
 
   if [[ $_count_nbr -gt 0 ]]; then
     # Two separate diagnoses for weak neighbors:
-    #   lo_raw:       raw RSSI is already below TX_LO, but the projected RSSI
-    #                 after applying rec_tx is not (or wasn't checked because
-    #                 tx_uncapped never left [min_tx, max_tx], in which case
-    #                 the corridor formula guarantees it lands in range).
-    #                 The recommendation resolves this neighbor.
-    #   lo_unfixable: even at the radio's TX limit, the projected RSSI stays
-    #                 below TX_LO. This is a hard coverage gap and the
-    #                 traditional "Coverage gap" warning.
+    #   lo_raw:       raw RSSI is already below TX_LO, and applying the
+    #                 recommended shift projects this specific neighbor back
+    #                 into the corridor (checked below, unconditionally --
+    #                 rec_tx is derived from the AVERAGE neighbor RSSI, so a
+    #                 shift that resolves the average does not automatically
+    #                 resolve every individual neighbor).
+    #   lo_unfixable: applying the recommended shift still leaves the
+    #                 projected RSSI below TX_LO for this neighbor -- whether
+    #                 because the radio is already at its TX limit (the
+    #                 original capped case) or because the averaged shift
+    #                 itself doesn't move this specific neighbor enough. This
+    #                 is a hard coverage gap and the traditional "Coverage
+    #                 gap" warning either way.
     # lo_unfixable wins over lo_raw on the same neighbor.
     for _j in "${!_nbr_peer[@]}"; do
       ((_nbr_rssi[_j] < TX_LO)) && _nbr_warn[_j]="lo_raw"
     done
 
     _shift_applied=$((rec_tx - tx))
-    if ((tx_uncapped > max_tx)); then
-      for _j in "${!_nbr_peer[@]}"; do
-        _proj=$((_nbr_rssi[_j] + _shift_applied))
-        ((_proj < TX_LO)) && _nbr_warn[_j]="lo_unfixable"
-      done
-    elif ((tx_uncapped < min_tx)); then
+    for _j in "${!_nbr_peer[@]}"; do
+      [[ "${_nbr_warn[$_j]:-}" == "lo_raw" ]] || continue
+      _proj=$((_nbr_rssi[_j] + _shift_applied))
+      ((_proj < TX_LO)) && _nbr_warn[_j]="lo_unfixable"
+    done
+
+    if ((tx_uncapped < min_tx)); then
       for _j in "${!_nbr_peer[@]}"; do
         _proj=$((_nbr_rssi[_j] + _shift_applied))
         ((_proj > TX_HI)) && _nbr_warn[_j]="hi"
