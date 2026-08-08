@@ -30,8 +30,7 @@ Expect an acknowledgment within 5 business days.
 Security-relevant surfaces:
 
 - **Configuration file (`config.yaml`)** contains a UniFi Network API key and, optionally, SSH credentials. The file is gitignored and must never be committed.
-- **SSH trust decisions** are documented in `README.md`. The tool follows the user's existing `~/.ssh/known_hosts` and does not silently accept unknown host keys.
-- **TLS trust for the UniFi controller** follows the user's system trust store. Self-signed controller certificates require an explicit `--insecure`-equivalent path documented in `README.md`.
+- **TLS certificate verification is disabled** (`curl -k`) for calls to the UniFi controller, and **SSH host-key verification is disabled** (`StrictHostKeyChecking=no`) for the AP neighbor scan. Both are deliberate, accepted tradeoffs for a tool targeting a trusted local network, not oversights; this tool's transport security should not be relied on across an untrusted network boundary. The controller URL and AP hosts always come from local `config.yaml`, never from API output or other untrusted input.
 - **No telemetry, no outbound calls** beyond the configured UniFi controller and the configured APs.
 
-Bugs that could invalidate any of the above (accidental write, credential leak in logs, weakened TLS/SSH verification, unintended outbound requests) are in scope.
+Bugs that could invalidate any of the above (accidental write, credential leak in logs, a controller URL or AP host derived from untrusted/remote input rather than local `config.yaml`, unintended outbound requests) are in scope.
