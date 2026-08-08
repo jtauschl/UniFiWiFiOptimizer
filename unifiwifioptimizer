@@ -2810,6 +2810,7 @@ print_ui_path_hint() {
   "DTIM Mode") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period" ;;
   "DTIM Period 2.4 GHz") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period → 2.4 GHz field" ;;
   "DTIM Period 5 GHz") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period → 5 GHz field" ;;
+  "DTIM Period 6 GHz") path="WLAN edit → Advanced → Behavior Controls → Auto 802.11 DTIM Period → 6 GHz field" ;;
   "Group Rekey Interval") path="WLAN edit → Advanced → Behavior Controls → Group Rekey Interval" ;;
   "Show Access Point Name in Beacon") path="WLAN edit → Advanced → Behavior Controls → Show Access Point Name in Beacon" ;;
   "Roaming Assistant") path="WLAN edit → Advanced → Roaming Assistance → Handoff Suggestions (802.11v)" ;;
@@ -2849,7 +2850,6 @@ print_general_check_rate() {
     printf "  ${RED}  ✗ %-${GENERAL_LABEL_WIDTH}s %s Mbps${RESET}\n" \
       "$label" "$expected_mbps"
     print_ui_path_hint "$label"
-    print_min_rate_dsss_advisory "$label" "${current_kbps:-0}" "$current_enabled"
     return
   fi
 
@@ -3035,13 +3035,24 @@ print_fast_roaming_bss_transition_advisory() {
 # expect it on.
 print_fast_roaming_iot_advisory() {
   local profile=$1 actual_wifi_bands=$2 fast_roaming=$3
+  local is_2g_only=false
   is_true "$fast_roaming" || return 0
+
+  wifi_band_includes "$actual_wifi_bands" "2g" &&
+    ! wifi_band_includes "$actual_wifi_bands" "5g" &&
+    ! wifi_band_includes "$actual_wifi_bands" "6g" &&
+    is_2g_only=true
+
   case "$profile" in
-  IoT)
-    printf "  ${YELLOW}    ! %s${RESET}\n" \
-      "802.11r Fast Transition is known to break some IoT clients (ESP32, older printers, Sonos gen1) — consider splitting IoT off to its own SSID with 802.11r disabled, or rely on BSS Transition (802.11v) alone."
+  IoT) ;;
+  Standard*)
+    [[ "$is_2g_only" == "true" ]] || return 0
     ;;
+  *) return 0 ;;
   esac
+
+  printf "  ${YELLOW}    ! %s${RESET}\n" \
+    "802.11r Fast Transition is known to break some IoT clients (ESP32, older printers, Sonos gen1) — consider splitting IoT off to its own SSID with 802.11r disabled, or rely on BSS Transition (802.11v) alone."
 }
 
 # Roaming Assistant compliance check (ALGORITHM.md §7). Compares the WLAN's
@@ -3693,26 +3704,32 @@ analyze_band() {
 
   if [[ $_count_nbr -gt 0 ]]; then
     # Two separate diagnoses for weak neighbors:
-    #   lo_raw:       raw RSSI is already below TX_LO, but the projected RSSI
-    #                 after applying rec_tx is not (or wasn't checked because
-    #                 tx_uncapped never left [min_tx, max_tx], in which case
-    #                 the corridor formula guarantees it lands in range).
-    #                 The recommendation resolves this neighbor.
-    #   lo_unfixable: even at the radio's TX limit, the projected RSSI stays
-    #                 below TX_LO. This is a hard coverage gap and the
-    #                 traditional "Coverage gap" warning.
+    #   lo_raw:       raw RSSI is already below TX_LO, and applying the
+    #                 recommended shift projects this specific neighbor back
+    #                 into the corridor (checked below, unconditionally --
+    #                 rec_tx is derived from the AVERAGE neighbor RSSI, so a
+    #                 shift that resolves the average does not automatically
+    #                 resolve every individual neighbor).
+    #   lo_unfixable: applying the recommended shift still leaves the
+    #                 projected RSSI below TX_LO for this neighbor -- whether
+    #                 because the radio is already at its TX limit (the
+    #                 original capped case) or because the averaged shift
+    #                 itself doesn't move this specific neighbor enough. This
+    #                 is a hard coverage gap and the traditional "Coverage
+    #                 gap" warning either way.
     # lo_unfixable wins over lo_raw on the same neighbor.
     for _j in "${!_nbr_peer[@]}"; do
       ((_nbr_rssi[_j] < TX_LO)) && _nbr_warn[_j]="lo_raw"
     done
 
     _shift_applied=$((rec_tx - tx))
-    if ((tx_uncapped > max_tx)); then
-      for _j in "${!_nbr_peer[@]}"; do
-        _proj=$((_nbr_rssi[_j] + _shift_applied))
-        ((_proj < TX_LO)) && _nbr_warn[_j]="lo_unfixable"
-      done
-    elif ((tx_uncapped < min_tx)); then
+    for _j in "${!_nbr_peer[@]}"; do
+      [[ "${_nbr_warn[$_j]:-}" == "lo_raw" ]] || continue
+      _proj=$((_nbr_rssi[_j] + _shift_applied))
+      ((_proj < TX_LO)) && _nbr_warn[_j]="lo_unfixable"
+    done
+
+    if ((tx_uncapped < min_tx)); then
       for _j in "${!_nbr_peer[@]}"; do
         _proj=$((_nbr_rssi[_j] + _shift_applied))
         ((_proj > TX_HI)) && _nbr_warn[_j]="hi"

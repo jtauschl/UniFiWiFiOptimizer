@@ -134,8 +134,9 @@ TX_HI = TX_LO + CORRIDOR_WIDTH
 | `CORRIDOR_WIDTH` | 6 dB | Symmetric tolerance around corridor center |
 | `ROAM_OFFSET_DB` | 0 | Roaming Assistant offset relative to `TX_LO`, applied per broadcasting AP before aggregation (set to 9 to reproduce the legacy −67 dBm value at Obstructed) |
 | `ROAM_MARGIN_DB` | 5 | Safety margin between weakest neighbor RSSI and the capped threshold |
-| `ROAM_FLOOR` | −78 dBm | Stability floor — below this, Roaming Assistant becomes pointless |
-| `ROAM_CEILING` | −67 dBm | Hard ceiling for the Roaming Assistant recommendation |
+| `ROAM_FLOOR` | −75 dBm | Stability floor — below this, Roaming Assistant becomes pointless. Matches Apple's macOS BTM trigger (iOS/iPad trigger at −70 dBm) |
+| `ROAM_CEILING` | −65 dBm | Hard ceiling for the Roaming Assistant recommendation |
+| `MIN_RSSI_OFFSET_DB` | 5 dB | How far below `TX_LO` the Minimum RSSI hard-disconnect threshold sits, giving BTM a lead time before the disconnect (range `0..30`) |
 
 `CORRIDOR_WIDTH` is a practical tolerance around the target overlap corridor. The current value of `6 dB` provides enough margin for normal variation and asymmetry without making the target corridor too loose to be useful.
 
@@ -158,18 +159,18 @@ The same TX_LO/TX_HI apply to all bands.
 ## 6. Minimum RSSI
 
 ```text
-recommended_min_rssi = TX_LO
+recommended_min_rssi = TX_LO - MIN_RSSI_OFFSET_DB
 ```
 
-Fixed value from the corridor, not from measurements. Acts as a hard disconnect threshold — the AP stops serving a client when its signal drops below `TX_LO`.
+Fixed value from the corridor, not from measurements. `MIN_RSSI_OFFSET_DB` (default `5`, range `0..30`) sits Minimum RSSI below `TX_LO` — vendor consensus is that the hard-disconnect threshold needs a safety margin below the BTM (soft-roam) trigger; a value of `0` reproduces the old TX_LO-equals-Minimum-RSSI behavior. Acts as a hard disconnect threshold — the AP stops serving a client when its signal drops below `TX_LO - MIN_RSSI_OFFSET_DB`.
 
 ### Relationship to Roaming Assistant
 
-**With `ROAM_OFFSET_DB=0`, Roaming Assistant and Minimum RSSI sit at the same level (`TX_LO`). If you enable Minimum RSSI and want a soft-roam (BTM) lead time before the hard disconnect, set a positive `ROAM_OFFSET_DB` (for example `3`).**
+**With the default `MIN_RSSI_OFFSET_DB=5` and `ROAM_OFFSET_DB=0`, Minimum RSSI sits 5 dB below Roaming Assistant's `TX_LO` trigger, giving BTM a lead time before the hard disconnect. Setting `MIN_RSSI_OFFSET_DB=0` removes that margin; a positive `ROAM_OFFSET_DB` widens it further by raising the Roaming Assistant trigger instead.**
 
-The default targets SOHO deployments where voice-style roaming is rare and Minimum RSSI is typically left disabled. Voice or realtime use cases that need a deliberate BTM lead time should set `ROAM_OFFSET_DB` explicitly.
+The default targets SOHO deployments where voice-style roaming is rare and Minimum RSSI is typically left disabled. Voice or realtime use cases that need a deliberate BTM lead time can rely on the default `MIN_RSSI_OFFSET_DB` margin, or increase `ROAM_OFFSET_DB` for more.
 
-For the default environment presets (`Open`, `Residential`, `Office`, `Obstructed`), `TX_LO` is between −72 and −76 dBm and `ROAM_FLOOR` is `−78`, so on APs where the coverage-gap cap engages, Roaming Assistant can drop below `TX_LO`. In that case the BTM request would be issued *after* Minimum RSSI would already have disconnected the client, so enabling Minimum RSSI on coverage-gap APs is not recommended. With a custom path-loss exponent that produces `TX_LO ≤ ROAM_FLOOR`, the cap cannot push Roaming Assistant below `TX_LO` at all.
+For the default environment presets (`Open`, `Residential`, `Office`, `Obstructed`), `TX_LO` is between −72 and −76 dBm and `ROAM_FLOOR` is `−75`, so on APs where the coverage-gap cap engages, Roaming Assistant can drop below `TX_LO`. In that case the BTM request would be issued *after* Minimum RSSI would already have disconnected the client, so enabling Minimum RSSI on coverage-gap APs is not recommended. With a custom path-loss exponent that produces `TX_LO ≤ ROAM_FLOOR`, the cap cannot push Roaming Assistant below `TX_LO` at all.
 
 The recommendation is always derived, but whether you enable it is a deployment choice. It is most useful when cells are planned, overlap exists, and sticky clients need to be reduced.
 
