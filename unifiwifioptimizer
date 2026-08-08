@@ -2487,18 +2487,22 @@ security_protocol_state() {
   fi
 }
 
-# Return success if the security protocol name uses SAE (WPA3 family).
+# Return success if the security protocol name uses SAE (WPA3-Personal only --
+# WPA3 Enterprise authenticates via 802.1X/EAP, not the SAE handshake, so it
+# has no SAE Anti-clogging/Sync Time settings).
 security_protocol_uses_sae() {
   case "$1" in
-  WPA3 | WPA2/WPA3 | "WPA3 Enterprise" | "WPA2/WPA3 Enterprise") return 0 ;;
+  WPA3 | WPA2/WPA3) return 0 ;;
   *) return 1 ;;
   esac
 }
 
-# Return success if the security protocol name is an OWE (Enhanced Open) variant.
-security_protocol_uses_owe() {
+# Return success if the security protocol name is any WPA3 variant (Personal
+# or Enterprise, transition or WPA3-only). Used for protocol-level rules like
+# the MLO/6 GHz PMF requirement, which apply regardless of Personal/Enterprise.
+security_protocol_uses_wpa3() {
   case "$1" in
-  "Enhanced Open (OWE)" | "Enhanced Open with Transition") return 0 ;;
+  WPA3 | WPA2/WPA3 | "WPA3 Enterprise" | "WPA2/WPA3 Enterprise") return 0 ;;
   *) return 1 ;;
   esac
 }
@@ -2982,30 +2986,27 @@ print_tx_pending_note() {
 
 # Advisory: MLO mandates WPA3 (PSK or Enterprise) + PMF Required by spec --
 # OWE is not a valid substitute for MLO's client authentication requirement.
-# The 6 GHz band mandates PMF Required too, but accepts either WPA3 or OWE
-# (Enhanced Open), since 6 GHz permits open/encrypted networks via OWE.
 # Checked against the WLAN's actual controller configuration, not its
 # matched profile -- this is a protocol-level consistency rule, not a
 # profile compliance check.
+#
+# The 6 GHz band is NOT checked here even though it has the same WPA3/OWE +
+# PMF Required requirement by spec: the WLAN-level security/PMF fields this
+# tool reads are shared across all bands on a multiband SSID, and the 6 GHz
+# band forbids WPA2/WPA3 transition mode -- so a 6 GHz-capable WLAN's
+# WLAN-level fields legitimately show WPA2/WPA3 + PMF Optional (UniFi's own
+# default when 6 GHz is enabled) while the 6 GHz radio itself enforces
+# WPA3-only + PMF Required internally, with no separate per-band field this
+# tool can read to confirm it. Flagging the WLAN-level fields here would be a
+# false positive against UniFi's own default 6 GHz configuration.
 print_wpa3_pmf_required_advisory() {
-  local mlo=$1 actual_wifi_bands=$2 actual_security_protocol=$3 actual_pmf=$4
-  local reason="" security_ok=false
+  local mlo=$1 actual_security_protocol=$2 actual_pmf=$3
 
-  if is_true "$mlo"; then
-    reason="MLO"
-    security_protocol_uses_sae "$actual_security_protocol" && security_ok=true
-  elif wifi_band_includes "$actual_wifi_bands" "6g"; then
-    reason="the 6 GHz band"
-    if security_protocol_uses_sae "$actual_security_protocol" || security_protocol_uses_owe "$actual_security_protocol"; then
-      security_ok=true
-    fi
-  else
-    return 0
-  fi
+  is_true "$mlo" || return 0
 
-  if [[ "$security_ok" != "true" || "$actual_pmf" != "Required" ]]; then
+  if ! security_protocol_uses_wpa3 "$actual_security_protocol" || [[ "$actual_pmf" != "Required" ]]; then
     printf "  ${YELLOW}    ! %s${RESET}\n" \
-      "${reason} requires WPA3 (or OWE on 6 GHz) + PMF Required by spec — current: ${actual_security_protocol}/${actual_pmf}."
+      "MLO requires WPA3 + PMF Required by spec — current: ${actual_security_protocol}/${actual_pmf}."
   fi
 }
 
@@ -3256,7 +3257,7 @@ print_general_checks() {
     print_general_group_header "  Security:"
     print_general_check_protocol "Security Protocol" "$expected_security_protocols" "$actual_security_protocol"
     print_general_check_value "PMF" "$expected_pmf" "$actual_pmf"
-    print_wpa3_pmf_required_advisory "$mlo" "$actual_wifi_bands" "$actual_security_protocol" "$actual_pmf"
+    print_wpa3_pmf_required_advisory "$mlo" "$actual_security_protocol" "$actual_pmf"
     print_general_check_bool "Hide WiFi Name" "$expected_hide_wifi_name" "$hide_ssid"
     print_general_check_bool "Client Device Isolation" "$expected_client_device_isolation" "$l2_isolation"
     if security_protocol_uses_sae "$actual_security_protocol"; then

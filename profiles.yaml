@@ -126,7 +126,7 @@ profiles:
     pmf: Optional
     hide_wifi_name: false
     client_device_isolation: false
-    sae_anti_clogging: 10
+    sae_anti_clogging: 5
     sae_sync_time: 5
     mlo: false
     bss_transition: true
@@ -159,7 +159,7 @@ profiles:
     pmf: Optional
     hide_wifi_name: false
     client_device_isolation: false
-    sae_anti_clogging: 10
+    sae_anti_clogging: 5
     sae_sync_time: 5
     mlo: false
     bss_transition: true

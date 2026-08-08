@@ -24,7 +24,7 @@ profiles:
       - 5g
     fast_roaming: true
     minrate_mode: manual
-    minrate_24_kbps: 11000
+    minrate_24_kbps: 12000
     minrate_5_kbps: 24000
     multicast_broadcast_blocker: false
     multicast_to_unicast: false
@@ -35,7 +35,7 @@ profiles:
     pmf: Optional
     hide_wifi_name: false
     client_device_isolation: false
-    sae_anti_clogging: 10
+    sae_anti_clogging: 5
     sae_sync_time: 5
     mlo: false
     bss_transition: true
