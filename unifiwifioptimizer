@@ -3151,9 +3151,11 @@ analyze_band() {
 
   if [[ $_count_nbr -gt 0 ]]; then
     # Two separate diagnoses for weak neighbors:
-    #   lo_raw:       raw RSSI is already below TX_LO. Indicative, but does
-    #                 not imply the situation is unfixable — TX recommendation
-    #                 may still pull the projected signal into the corridor.
+    #   lo_raw:       raw RSSI is already below TX_LO, but the projected RSSI
+    #                 after applying rec_tx is not (or wasn't checked because
+    #                 tx_uncapped never left [min_tx, max_tx], in which case
+    #                 the corridor formula guarantees it lands in range).
+    #                 The recommendation resolves this neighbor.
     #   lo_unfixable: even at the radio's TX limit, the projected RSSI stays
     #                 below TX_LO. This is a hard coverage gap and the
     #                 traditional "Coverage gap" warning.
@@ -3200,7 +3202,7 @@ analyze_band() {
   fi
   if [[ -n "$_warn_lo_raw" ]]; then
     printf "\n  ${YELLOW}° Below corridor before TX adjustment at: %s${RESET}\n" "${_warn_lo_raw% }"
-    printf '  %s  Raw RSSI is below TX_LO; the TX recommendation may or may not bring this neighbor back into the corridor.%s\n' "$YELLOW" "$RESET"
+    printf '  %s  Raw RSSI is below TX_LO; applying the Transmit Power recommendation above brings this neighbor into the corridor.%s\n' "$YELLOW" "$RESET"
   fi
   if [[ -n "$_warn_hi" ]]; then
     printf "\n  ${YELLOW}* Excess overlap – signal too strong at: %s${RESET}\n" "${_warn_hi% }"
