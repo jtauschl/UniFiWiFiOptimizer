@@ -1,20 +1,18 @@
 # Dependabot configuration for jtauschl/unifiwifioptimizer.
 #
 # Note: Dependabot reads this file only from the repository's default branch
-# (main). This file was added on release/0.5.0 to lock the configuration in
-# alongside the rest of the sw_dev_handbook v0.10.5 tooling adoption; it
-# becomes active only after release/0.5.0 is fast-forward-promoted to main.
+# (main). This file was added on release/0.5.0; it becomes active only
+# after release/0.5.0 is fast-forward-promoted to main.
 #
 # Dependabot PRs that later land on an open release/* branch are merged
 # with a normal squash-merge, not through the fast-forward-only promotion
-# rule (sw_dev_handbook v0.10.1 git-workflow).
+# rule.
 
 version: 2
 updates:
   # GitHub Actions used by workflows in .github/workflows/.
-  # All actions are SHA-pinned; Dependabot proposes upgrades and this is
-  # the mechanism the umbrella policy (sw_dev_handbook v0.6.0+) relies on
-  # to keep those pins current.
+  # All actions are SHA-pinned; Dependabot proposes upgrades to keep
+  # those pins current.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

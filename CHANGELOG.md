@@ -5,13 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased 0.5.0]
+## [0.5.0] - Unreleased
 
 <!--
 Focus statement: to be copied verbatim from this Version's OpenProject
-description field once set (sw_dev_handbook v0.10.5,
-documentation.md#version-focus-statement — one to two sentences naming
-the version's goal, not a status recap or an approach detail).
+description field once set — one to two sentences naming the version's
+goal, not a status recap or an approach detail.
 -->
 
 ### Added
@@ -22,7 +21,7 @@ the version's goal, not a status recap or an approach detail).
 - `band_steering` profile field (controller field `no2ghz_oui`, live-verified against a real controller): whether dual-band clients should be steered away from 2.4 GHz. Shipped defaults: enabled for `Standard`/`Throughput`/`Latency` (a deliberate best-practice recommendation, not a UDM baseline snapshot), disabled for `IoT` (many clients are 2.4-GHz-only) and `Hotspot` (compatibility over optimization). Previously this field was out of scope with a "configure manually" note in `docs/PROFILES.md`; the other five fields considered for this cycle (Individual/Broadcast TWT, OWE Transition, SAE H2E-only, Transition Disable) were not added — none of them exist on the live-verified `wlanconf` controller schema.
 - `tests/roaming_test.sh`, `tests/tx_test.sh`, `tests/security_test.sh`, run automatically by `./dev ci`.
 - `.github/dependabot.yml` (github-actions weekly). Note: Dependabot reads the config only from the default branch, so it becomes active after this release branch is fast-forward-promoted to `main`.
-- Doc-comments on every Top-Level Bash function in `unifiwifioptimizer` and `scripts/install.sh` (sw_dev_handbook v0.9.1).
+- Doc-comments on every Top-Level Bash function in `unifiwifioptimizer` and `scripts/install.sh`.
 - Advisory line when a WLAN's 2.4 GHz minimum data rate is below 12 Mbps. 11 Mbps and lower are the true 802.11b DSSS rates (1/2/5.5/11) and keep the 802.11b protection overhead active for every OFDM frame on the SSID; 6/9 Mbps are 802.11a/g OFDM rates still below the recommendation but don't themselves admit 802.11b clients, so the wording differs between the two cases. Independent of the profile-vs-actual comparison; also fires when no profile is matched.
 - Advisory line when 802.11r Fast Transition is enabled on a WLAN whose matched profile is `IoT`. 802.11r is known to break specific IoT client classes (ESP32, older printers, Sonos gen1); the tool now points at splitting IoT off to its own SSID with 11r disabled, or relying on 802.11v alone.
 - Advisory line when a WLAN has MLO enabled but doesn't meet its security requirement — MLO requires WPA3 (PSK or Enterprise) + PMF Required by spec. Checked against the WLAN's actual controller configuration, not its matched profile. The 6 GHz band has the same requirement by spec but is deliberately not checked here: this tool only sees WLAN-level (not per-band) security/PMF fields, and 6 GHz forbids WPA2/WPA3 transition mode, so a 6 GHz-capable WLAN's WLAN-level fields legitimately show UniFi's own default of WPA2/WPA3 + PMF Optional while the 6 GHz radio itself enforces WPA3-only + PMF Required internally — flagging the WLAN-level fields would be a false positive against UniFi's default 6 GHz configuration.
@@ -30,11 +29,6 @@ the version's goal, not a status recap or an approach detail).
 - Security Protocol recognition for `Enhanced Open (OWE)` and `Enhanced Open with Transition` (UniFi Network 10.2+, live-verified against a real controller) — previously any WLAN with `security: open` was reported as plain `Open` regardless of its actual OWE encryption state.
 - A `→` line under every ✗ compliance check and TX/roaming/channel recommendation, naming exactly where in the UniFi UI to make the change (e.g. "WLAN edit → Advanced → Security → PMF"). Live-verified against a real controller across WLAN, AP, and site-level settings screens this session; silent for the handful of checks with no confirmed UI location rather than guessing. The MLO hint additionally notes that toggling MLO in the UniFi UI silently changes PMF/WPA3-transition/Fast-Roaming as a side effect, discovered while verifying this feature.
 - Scope statement at the end of every run: this tool works from controller configuration and AP-to-AP neighbor scans, and cannot see non-WiFi RF interference, per-client MCS or retry statistics, real roaming timing, or packet captures. Prevents the tool from being oversold as a spectrum-analysis or client-telemetry equivalent.
-
-### Changed
-- `sw_dev_handbook` pin bumped from v0.10.4 to v0.10.5.
-- `dev` wrapper header pin bumped from a stale `v0.10.0` label to `v0.10.5`.
-- `scripts/handbook-check.sh` refreshed from the v0.10.5 template — adds `copied_script_drift` check (WARN-only, compares this project's copies of `handbook-check.sh`/`github-security-settings.sh` against their upstream templates and expects `.divergence-reason` sidecars) and a `--whats-new [<target-tag>]` mode that prints the handbook's own `CHANGELOG.md` sections between this project's currently-pinned tag and a target tag.
 
 ### Fixed
 - `security_protocol_uses_sae()` no longer matches `WPA3 Enterprise`/`WPA2/WPA3 Enterprise` — WPA3 Enterprise authenticates via 802.1X/EAP, not the SAE handshake, so it has no SAE Anti-clogging/Sync Time settings to check, and the tool was incorrectly comparing them against the profile baseline for Enterprise WLANs. A new `security_protocol_uses_wpa3()` (matching all four WPA3 variants) now backs the MLO security-requirement advisory, which does apply to Enterprise.
@@ -59,15 +53,14 @@ the version's goal, not a status recap or an approach detail).
 - `ROAM_FLOOR` bumped from -78 to -75 dBm and `ROAM_CEILING` from -67 to -65 dBm to match Apple's published BTM triggers (iOS/iPad -70 dBm, macOS -75 dBm). A floor below -75 lets BTM fire only after a macOS client has already fallen. The legacy fixed -67 dBm behavior can still be reproduced with `ROAM_CEILING=-67 ROAM_OFFSET_DB=<+7..+9>` (site-environment dependent).
 - Minimum RSSI recommendation now sits `MIN_RSSI_OFFSET_DB` (default 5 dB) below TX_LO instead of at TX_LO itself. Vendor consensus is that the hard-disconnect threshold must sit 5-8 dB below the BTM (soft-roam) trigger; equal values give clients no roaming window and produce disconnect loops on 802.11v-capable clients.
 
-## [Unreleased 0.4.1]
+## [0.4.1] - Unreleased
 
 <!--
-Verbatim-synced copy of `release/0.4.1`'s own [Unreleased 0.4.1] section.
+Verbatim-synced copy of `release/0.4.1`'s own [0.4.1] - Unreleased section.
 Edits to any bullet below must happen on `release/0.4.1` first and be
 copied here in a separate, immediately-following commit on
 `release/0.5.0` before the underlying `release/0.4.1` work is considered
-done (sw_dev_handbook v0.10.5,
-documentation.md#parallel-unreleased-release-branches).
+done.
 -->
 
 ### Fixed
@@ -168,8 +161,8 @@ First public release.
 - UniFi Network API integration (read-only).
 - Multi-site support.
 
-[Unreleased 0.5.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.5.0
-[Unreleased 0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.4.1
+[0.5.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.5.0
+[0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...release/0.4.1
 [0.4.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.1.0...v0.2.0

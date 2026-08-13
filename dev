@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# dev — repo-local convenience wrapper (bash, per sw_dev_handbook, pinned v0.10.5).
+# dev — repo-local convenience wrapper (bash).
 #
 # Commands:
-#   ./dev bootstrap       Install/refresh local dev-only setup (currently: the
-#                         shared commit-msg hook). Safe to re-run any time.
-#   ./dev test            Run the test suite alone (tests/*_test.sh).
-#   ./dev build           No-op: this is a single Bash script with no compile
-#                         step. Present to satisfy sw_dev_handbook's minimum
-#                         ./dev subcommand set.
-#   ./dev ci              Run every gate CI runs: bash -n, shellcheck, shfmt -d,
-#                         actionlint (if any workflows), smoke test, tests.
-#   ./dev fmt             Apply shfmt formatting in place.
-#   ./dev lint            Run shellcheck alone.
-#   ./dev handbook-check  Run sw_dev_handbook's conformance checker.
+#   ./dev bootstrap  Install/refresh local dev-only setup (currently: the
+#                    shared commit-msg hook). Safe to re-run any time.
+#   ./dev test       Run the test suite alone (tests/*_test.sh).
+#   ./dev build      No-op: this is a single Bash script with no compile
+#                    step.
+#   ./dev ci         Run every gate CI runs: bash -n, shellcheck, shfmt -d,
+#                    actionlint (if any workflows), smoke test, tests.
+#   ./dev fmt        Apply shfmt formatting in place.
+#   ./dev lint       Run shellcheck alone.
 #
-# Missing tools hard-fail with install hints (v0.6.0 pattern).
+# Handbook conformance checking no longer lives here: handbook-check.sh
+# moved to this project's private docs companion repo's own scripts/
+# folder and runs against this repo as an explicitly-named sibling.
+# Run it from there: <companion-repo>/scripts/handbook-check.sh unifiwifioptimizer
+#
+# Missing tools hard-fail with install hints.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -24,8 +27,6 @@ shell_scripts=(
   scripts/install.sh
   scripts/uninstall.sh
   scripts/sync-commit-msg-hook.sh
-  scripts/github-security-settings.sh
-  scripts/handbook-check.sh
 )
 for f in tests/*_test.sh; do
   [[ -f "$f" ]] && shell_scripts+=("$f")
@@ -103,11 +104,6 @@ run_build() {
   echo "nothing to build -- single bash script, no compile step"
 }
 
-run_handbook_check() {
-  require yq "brew install yq (macOS) -- must be mikefarah/yq v4, not kislyuk/yq"
-  ./scripts/handbook-check.sh "$@"
-}
-
 cmd="${1:-}"
 shift || true
 case "$cmd" in
@@ -135,11 +131,8 @@ fmt)
 lint)
   run_shellcheck
   ;;
-handbook-check)
-  run_handbook_check "$@"
-  ;;
 *)
-  echo "usage: ./dev {bootstrap|test|build|ci|fmt|lint|handbook-check}"
+  echo "usage: ./dev {bootstrap|test|build|ci|fmt|lint}"
   exit 1
   ;;
 esac
