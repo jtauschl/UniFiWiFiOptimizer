@@ -134,7 +134,6 @@ validate_roam_constants() {
 }
 validate_roam_constants
 
-# Output colors and label widths used by the terminal report
 RED=$'\e[31m'
 YELLOW=$'\e[33m'
 GREEN=$'\e[32m'
@@ -143,12 +142,9 @@ RESET=$'\e[0m'
 GENERAL_LABEL_WIDTH=32
 REC_LABEL_WIDTH=24
 
-# Create and clean up temp dir for controller snapshots, parsed TSV data,
-# and AP scan output collected during this run.
 tmpdir=$(mktemp -d)
 trap '[[ -n "$tmpdir" && -d "$tmpdir" ]] && rm -rf "$tmpdir"' EXIT
 
-# Temporary files used throughout the run
 ENV_FILE="${tmpdir}/controller.env"
 SITES_FILE="${tmpdir}/sites.tsv"
 WLANS_FILE="${tmpdir}/wlans.tsv"
@@ -1941,8 +1937,8 @@ prepare_site_roaming_checks() {
     # physical AP masquerade as several -- turning a real single-AP WLAN
     # into an apparent multi-AP one, or skewing the min() aggregation with a
     # duplicated value. An ap_group_id with no matching row in
-    # site_apgroups_tsv_path() (unknown/unresolvable group) previously
-    # vanished silently; it's now recorded as its own incomplete reason.
+    # site_apgroups_tsv_path() (unknown/unresolvable group) is recorded as
+    # its own incomplete reason instead of being silently dropped.
     # Bash 3.2 (macOS system bash) has no associative arrays, so "seen"
     # tracking uses a plain delimited string and glob matching instead --
     # MACs and AP names never contain spaces, so this is safe.
@@ -2771,7 +2767,6 @@ print_general_checks() {
   fi
 }
 
-# print_rec_tx  recommended txmode current
 print_rec_tx() {
   local recommended=$1 txmode=$2 current=$3
   local label="Transmit Power"
@@ -2797,7 +2792,6 @@ print_rec_tx() {
   fi
 }
 
-# print_rec_min_rssi  recommended enabled current
 print_rec_min_rssi() {
   local recommended=$1 enabled=$2 current=$3
   local label="Minimum RSSI"
@@ -2827,7 +2821,6 @@ print_rec_interference_blocker() {
   fi
 }
 
-# print_rec_roaming  recommended roam_enabled current_roam_rssi
 print_rec_roaming() {
   local recommended=$1 roam_enabled=$2 current_roam_rssi=$3
   local label="Roaming Assistant"

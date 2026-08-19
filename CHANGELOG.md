@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased 0.4.1]
+## [0.4.1] - Unreleased
 
 <!--
 Since sw_dev_handbook v0.10.5 there are two open release lines
 (release/0.4.1 hotfix and release/0.5.0 next-release), so this branch's
-own in-progress content lives under [Unreleased 0.4.1] rather than a
-plain [Unreleased] — release/0.5.0's CHANGELOG.md carries a verbatim
+own in-progress content lives under its own version heading rather than
+a plain [Unreleased] — release/0.5.0's CHANGELOG.md carries a verbatim
 copy of this section, kept in sync per documentation.md#parallel-
 unreleased-release-branches: an edit to any bullet here must land as a
 separate, immediately-following commit on release/0.5.0 before the
@@ -19,26 +19,22 @@ underlying work here is considered done.
 -->
 
 ### Fixed
-- Roaming Assistant recommendations silently stopped working: Ubiquiti removed the per-radio API fields (`radio_table[].assisted_roaming_enabled`/`assisted_roaming_rssi`) at some point after v0.4.0, and the tool was falling back to defaults without any indication. Confirmed against a live controller (Network Application, AP firmware 6.7.54 and 8.7.11).
-- `roaming_wlan.tsv` used a plain tab as field separator while its `aggregated_rssi` field is legitimately empty for `na`/`not_evaluable`/`incomplete` rows; `IFS=$'\t' read` collapses adjacent tabs (tab is IFS whitespace), silently shifting every field after the empty one and, in the worst case, aborting under `set -u`. Migrated to the existing `WLAN_FIELD_SEP` (`\037`) convention already used elsewhere for TSV rows with optional empty fields.
-
-- Roaming Assistant compliance line no longer reports a red ✗ deviation when the UniFi API returns `na_enabled=true` but `na_rssi=""` — a blank `na_rssi` was being coerced by bash arithmetic to 0 and compared against the site's aggregated_rssi, producing a phantom deviation with no visible cause.
-- `prepare_site_roaming_checks` and `check_general_settings` no longer leak `current_site` into caller scope — the missing `local` declarations were masked in the production AP loop but active leaks under any refactor that stopped shadowing them.
-- `scripts/install.sh` EXIT/INT/TERM trap now restores terminal echo before removing the tmpdir — a Ctrl-C between the SSH-password prompt's `stty -echo` and `stty echo` would otherwise leave the user's shell silently accepting input.
-- `for gid in ${ap_group_ids_field//|/ }` (and the nested `for mac`) no longer subject each token to shell pathname expansion — a UniFi id or MAC containing a glob metachar would have silently iterated over local filenames instead of the id list. Now uses `IFS='|' read -r -a` into a properly-quoted array.
-- `Throughput` and `Latency` profiles: `minrate_24_kbps` bumped from 11000 to 12000. 11 Mbps is an 802.11b DSSS rate; setting it as the minimum kept 802.11b clients allowed to associate and preserved the 802.11b protection overhead. 12 Mbps is the lowest OFDM rate. Matches Cisco/Aruba/Ubiquiti "kill 802.11b" guidance.
-- `ROAM_FLOOR` bumped from -78 to -75 dBm and `ROAM_CEILING` from -67 to -65 dBm to match Apple's published BTM triggers (iOS/iPad -70 dBm, macOS -75 dBm). A floor below -75 lets BTM fire only after a macOS client has already fallen. The legacy fixed -67 dBm behavior can still be reproduced with `ROAM_CEILING=-67 ROAM_OFFSET_DB=<+7..+9>` (site-environment dependent).
-- Minimum RSSI recommendation now sits `MIN_RSSI_OFFSET_DB` (default 5 dB) below TX_LO instead of at TX_LO itself. Vendor consensus is that the hard-disconnect threshold must sit 5-8 dB below the BTM (soft-roam) trigger; equal values give clients no roaming window and produce disconnect loops on 802.11v-capable clients.
-- `security_protocol_uses_sae()` now recognizes `WPA3 Enterprise`/`WPA2/WPA3 Enterprise`, not just `WPA3`/`WPA2/WPA3` — WLANs with Enterprise security were silently skipping the SAE Anti-clogging/Sync Time compliance checks.
-- `scripts/install.sh` now creates `config.yaml` with `chmod 600` and preserves permissions on backup copies via `cp -p`, instead of relying on the caller's `umask` — the file holds an API key and optionally an SSH password.
-- `SECURITY.md` corrected to match actual behavior — it previously claimed SSH host-key verification followed `~/.ssh/known_hosts` and TLS trust followed the system trust store, but both are actually disabled (`curl -k`, `StrictHostKeyChecking=no`), a deliberate tradeoff for a tool targeting a trusted local network.
-- Semgrep CI config: `p/bash` removed (the ruleset no longer exists in the Semgrep registry, 404), version bumped from 1.140.0 to 1.172.0.
-- The `lo_unfixable`/Coverage-gap escalation check in `analyze_band()` now runs for every neighbor below `TX_LO`, not only when the TX recommendation itself was capped at the radio's TX limit. Because `calculate_tx_recommendation()` derives its shift from the *averaged* RSSI across all neighbors, a shift that resolves the average (or gets suppressed by hysteresis, leaving `rec_tx == current_tx`) could previously leave an individual neighbor still below `TX_LO` while only showing the softer `°` "Below corridor" marker instead of the correct `*` Coverage gap warning — silently understating a real coverage problem. The "Below corridor" note's claim that the recommendation resolves the neighbor is now actually guaranteed, since any neighbor it doesn't resolve is escalated to Coverage gap instead.
+- Roaming Assistant recommendations silently stopped working on current UniFi firmware.
+- Fixed a rare crash or incorrect Roaming Assistant compliance result for a WLAN whose aggregated signal value was empty.
+- Roaming Assistant compliance no longer reports a false deviation for a WLAN with Roaming Assistant enabled but no RSSI threshold set yet.
+- A Ctrl-C during the installer's SSH password prompt no longer leaves the terminal not echoing typed input afterward.
+- A UniFi AP group ID or MAC address containing special shell characters no longer causes incorrect behavior during analysis.
+- `Throughput` and `Latency` profiles: minimum 2.4 GHz data rate raised from 11 Mbps to 12 Mbps, dropping legacy 802.11b compatibility in favor of Cisco/Aruba/Ubiquiti's "kill 802.11b" guidance.
+- Roaming Assistant and Minimum RSSI defaults recalibrated to match Apple's published roaming triggers, reducing premature disconnects on iOS/macOS clients.
+- Minimum RSSI recommendation is now set with a safety margin below the roaming trigger instead of equal to it, preventing disconnect loops on 802.11v-capable clients.
+- WLANs using WPA3 Enterprise / WPA2/WPA3 Enterprise no longer silently skip SAE Anti-clogging/Sync Time compliance checks.
+- The installer now creates `config.yaml` (and its backups) with restrictive file permissions, since it holds an API key and optionally an SSH password.
+- `SECURITY.md` corrected: SSH host-key verification and TLS certificate trust are disabled by design for this tool, not enforced as previously documented.
+- Coverage-gap warnings are now shown for every neighbor still below the target signal corridor, instead of only when TX power itself hit its hardware limit — a real coverage problem could previously be understated.
 
 ### Changed
-- Roaming Assistant migrated from a per-AP RF-tuning recommendation to a per-WLAN compliance check next to Fast Roaming, matching UniFi's move of the setting from radio level (`radio_table`) to WLAN level (`wlanconf.roaming_assistant_na_*`). The target threshold is still computed from the same site-aware corridor as before, aggregated (as a conservative minimum) across the APs that broadcast each WLAN, restricted to each AP's configured RF neighbors that also broadcast that SSID.
-- WLANs whose broadcasting APs have incomplete data (a broadcasting AP with no SSID-relevant RF neighbor, or a missing neighbor sighting) are reported `Incomplete` with the specific reason, instead of a ✓/✗ verdict computed from a partial data set.
-- On older controllers where no WLAN exposes the new field, the tool falls back site-wide to the previous per-AP behavior.
+- Roaming Assistant is now evaluated per WLAN instead of per AP, matching UniFi's own configuration model. WLANs with incomplete scan data are reported as `Incomplete` with a reason instead of a computed verdict.
+- On older controllers without per-WLAN Roaming Assistant support, the tool falls back to the previous per-AP behavior.
 
 ## [0.4.0] - 2026-05-06
 
@@ -117,7 +113,7 @@ First public release.
 - UniFi Network API integration (read-only).
 - Multi-site support.
 
-[Unreleased 0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...HEAD
+[0.4.1]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jtauschl/unifiwifioptimizer/compare/v0.1.0...v0.2.0
