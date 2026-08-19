@@ -133,7 +133,6 @@ validate_roam_constants() {
   fi
 }
 
-# Output colors and label widths used by the terminal report
 RED=$'\e[31m'
 YELLOW=$'\e[33m'
 GREEN=$'\e[32m'
@@ -1053,19 +1052,16 @@ ssh_scan_ap() {
 cache_dir="/tmp/unifiwifioptimizer_scan.$$"
 mkdir -p "$cache_dir" 2>/dev/null || cache_dir="/tmp"
 
-# Remove the AP-side scan cache directory on exit.
 cleanup_scan_cache() {
   rm -rf "$cache_dir" 2>/dev/null
 }
 
 trap cleanup_scan_cache EXIT
 
-# Replace filesystem-unsafe characters in an interface name with underscores.
 sanitize_iface_token() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
-# Return the cached-file path for the full "iw dev" dump.
 iw_dev_dump_path() {
   printf '%s/iw_dev.txt\n' "$cache_dir"
 }
@@ -1079,7 +1075,6 @@ ensure_iw_dev_dump() {
   printf '%s\n' "$_path"
 }
 
-# Return the cached-file path for a specific interface's info dump.
 iface_info_path() {
   printf '%s/iface_%s.info\n' "$cache_dir" "$(sanitize_iface_token "$1")"
 }
@@ -1093,7 +1088,6 @@ ensure_iface_info() {
   printf '%s\n' "$_path"
 }
 
-# Return the cached-file path for a specific PHY's info dump.
 phy_info_path() {
   printf '%s/phy_%s.info\n' "$cache_dir" "$1"
 }
@@ -2211,8 +2205,8 @@ prepare_site_roaming_checks() {
     # physical AP masquerade as several -- turning a real single-AP WLAN
     # into an apparent multi-AP one, or skewing the min() aggregation with a
     # duplicated value. An ap_group_id with no matching row in
-    # site_apgroups_tsv_path() (unknown/unresolvable group) previously
-    # vanished silently; it's now recorded as its own incomplete reason.
+    # site_apgroups_tsv_path() (unknown/unresolvable group) is recorded as
+    # its own incomplete reason instead of being silently dropped.
     # Bash 3.2 (macOS system bash) has no associative arrays, so "seen"
     # tracking uses a plain delimited string and glob matching instead --
     # MACs and AP names never contain spaces, so this is safe.
@@ -3294,7 +3288,6 @@ print_general_checks() {
   fi
 }
 
-# print_rec_tx  recommended txmode current
 print_rec_tx() {
   local recommended=$1 txmode=$2 current=$3
   local label="Transmit Power"
@@ -3347,7 +3340,6 @@ print_rec_tx_zero_sightings() {
   printf '  %s  If this AP is genuinely out of range of its configured neighbor(s), revert manually -- this recommendation cannot distinguish a temporary scan miss from a structurally unreachable neighbor.%s\n' "$YELLOW" "$RESET"
 }
 
-# print_rec_min_rssi  recommended enabled current
 print_rec_min_rssi() {
   local recommended=$1 enabled=$2 current=$3
   local label="Minimum RSSI"
@@ -3379,7 +3371,6 @@ print_rec_interference_blocker() {
   fi
 }
 
-# print_rec_roaming  recommended roam_enabled current_roam_rssi
 print_rec_roaming() {
   local recommended=$1 roam_enabled=$2 current_roam_rssi=$3
   local label="Roaming Assistant"
@@ -3854,12 +3845,9 @@ ap_scan_prefix() {
 main() {
   validate_roam_constants
 
-  # Create and clean up temp dir for controller snapshots, parsed TSV data,
-  # and AP scan output collected during this run.
   tmpdir=$(mktemp -d)
   trap '[[ -n "$tmpdir" && -d "$tmpdir" ]] && rm -rf "$tmpdir"' EXIT
 
-  # Temporary files used throughout the run
   ENV_FILE="${tmpdir}/controller.env"
   SITES_FILE="${tmpdir}/sites.tsv"
   WLANS_FILE="${tmpdir}/wlans.tsv"
@@ -4084,7 +4072,6 @@ main() {
       [[ -n "$hw_model" ]] && model=$hw_model
       [[ "$cac5_state" == "active" ]] && has_active_dfs_cac=true
 
-      # Get current radio info from cached UniFi device data
       # Format: ch24|ht24|tx24|min_tx24|max_tx24|txmode24|min_rssi24|min_rssi_en24|ch5|ht5|tx5|min_tx5|max_tx5|txmode5|min_rssi5|min_rssi_en5|roam_enabled|roam_rssi|ib24|ib5|dfs5
       radio_info=$(get_radio_info "$site" "$ap")
       IFS='|' read -r \
@@ -4096,7 +4083,6 @@ main() {
       has_radio5_api=false
       [[ -n "${ch5}${cht5}${tx5}" ]] && has_radio5_api=true
 
-      # Warn if critical radio data is missing from the API
       if [[ -z "$tx24" || -z "$tx5" ]]; then
         printf '  %s  ! Warning: incomplete radio data from API — recommendations may use defaults%s\n' "$RED" "$RESET"
       fi

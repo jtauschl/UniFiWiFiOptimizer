@@ -75,7 +75,6 @@ fixture_ap() {
   printf '%s\t%s\t%s\t10.0.0.1\tTestModel\n' "$site" "$ap" "$mac" >>"$APS_FILE"
 }
 
-# Writes RF-neighbor config for an AP (comma-separated peer list).
 fixture_neighbors() {
   local site=$1 ap=$2 peers=$3
   printf '%s\t%s\t%s\n' "$site" "$ap" "$peers" >>"$NEIGHBORS_FILE"
