@@ -28,7 +28,7 @@ shell_scripts=(
   scripts/uninstall.sh
   scripts/sync-commit-msg-hook.sh
 )
-for f in tests/*_test.sh; do
+for f in tests/*.sh; do
   [[ -f "$f" ]] && shell_scripts+=("$f")
 done
 

@@ -13,34 +13,13 @@
 #   calculate_roaming_recommendation() in the sourced script.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TOOL="${SCRIPT_DIR}/../unifiwifioptimizer"
+TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="${TEST_DIR}/../unifiwifioptimizer"
 
 # shellcheck source=/dev/null
 source "$TOOL"
-
-pass_count=0
-fail_count=0
-
-assert_eq() {
-  local expected=$1 actual=$2 msg=$3
-  if [[ "$expected" == "$actual" ]]; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected: %s\n  actual:   %s\n' "$msg" "$expected" "$actual" >&2
-  fi
-}
-
-assert_contains() {
-  local haystack=$1 needle=$2 msg=$3
-  if [[ "$haystack" == *"$needle"* ]]; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected to contain: %s\n  actual: %s\n' "$msg" "$needle" "$haystack" >&2
-  fi
-}
+# shellcheck source=./test_helpers.sh
+source "${TEST_DIR}/test_helpers.sh"
 
 # Sets up a fresh tmpdir with the global path variables main() would
 # normally set, plus a fixed site-aware TX_LO (Residential, n=2.8, matching

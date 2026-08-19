@@ -7,64 +7,13 @@
 # here. No fixture files needed: these functions take plain string args.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TOOL="${SCRIPT_DIR}/../unifiwifioptimizer"
+TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="${TEST_DIR}/../unifiwifioptimizer"
 
 # shellcheck source=/dev/null
 source "$TOOL"
-
-pass_count=0
-fail_count=0
-
-assert_eq() {
-  local expected=$1 actual=$2 msg=$3
-  if [[ "$expected" == "$actual" ]]; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected: %s\n  actual:   %s\n' "$msg" "$expected" "$actual" >&2
-  fi
-}
-
-assert_success() {
-  local fn=$1 arg=$2 msg=$3
-  if "$fn" "$arg"; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected %s %q to succeed\n' "$msg" "$fn" "$arg" >&2
-  fi
-}
-
-assert_failure() {
-  local fn=$1 arg=$2 msg=$3
-  if ! "$fn" "$arg"; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected %s %q to fail\n' "$msg" "$fn" "$arg" >&2
-  fi
-}
-
-assert_contains() {
-  local haystack=$1 needle=$2 msg=$3
-  if [[ "$haystack" == *"$needle"* ]]; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected to contain: %s\n  actual: %s\n' "$msg" "$needle" "$haystack" >&2
-  fi
-}
-
-assert_empty() {
-  local actual=$1 msg=$2
-  if [[ -z "$actual" ]]; then
-    pass_count=$((pass_count + 1))
-  else
-    fail_count=$((fail_count + 1))
-    printf 'FAIL: %s\n  expected empty output, got: %s\n' "$msg" "$actual" >&2
-  fi
-}
+# shellcheck source=./test_helpers.sh
+source "${TEST_DIR}/test_helpers.sh"
 
 # ==============================================================================
 # security_protocol_state(): WPA3 Enterprise must be distinguished from
