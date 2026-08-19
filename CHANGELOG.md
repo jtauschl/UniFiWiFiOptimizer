@@ -8,14 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.1] - Unreleased
 
 <!--
-Since sw_dev_handbook v0.10.5 there are two open release lines
-(release/0.4.1 hotfix and release/0.5.0 next-release), so this branch's
-own in-progress content lives under its own version heading rather than
-a plain [Unreleased] — release/0.5.0's CHANGELOG.md carries a verbatim
-copy of this section, kept in sync per documentation.md#parallel-
-unreleased-release-branches: an edit to any bullet here must land as a
-separate, immediately-following commit on release/0.5.0 before the
-underlying work here is considered done.
+There are two open release lines (release/0.4.1 hotfix and release/0.5.0
+next-release), so this branch's own in-progress content lives under its
+own version heading rather than a plain [Unreleased] — release/0.5.0's
+CHANGELOG.md carries a verbatim copy of this section, kept in sync: an
+edit to any bullet here must land as a separate, immediately-following
+commit on release/0.5.0 before the underlying work here is considered
+done.
 -->
 
 ### Fixed
