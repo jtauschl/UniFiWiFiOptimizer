@@ -54,7 +54,7 @@ done.
 - `Throughput` and `Latency` profiles: minimum 2.4 GHz data rate raised from 11 Mbps to 12 Mbps, dropping legacy 802.11b compatibility in favor of Cisco/Aruba/Ubiquiti's "kill 802.11b" guidance.
 - Roaming Assistant and Minimum RSSI defaults recalibrated to match Apple's published roaming triggers, reducing premature disconnects on iOS/macOS clients.
 - Minimum RSSI recommendation is now set with a safety margin below the roaming trigger instead of equal to it, preventing disconnect loops on 802.11v-capable clients.
-- WLANs using WPA3 Enterprise / WPA2/WPA3 Enterprise no longer silently skip SAE Anti-clogging/Sync Time compliance checks.
+- WLANs using WPA3 Enterprise / WPA2/WPA3 Enterprise no longer have SAE Anti-clogging/Sync Time incorrectly checked against the profile baseline, since Enterprise doesn't use the SAE handshake. *(This bullet differs from `release/0.4.1`'s own wording: a later, more thorough fix on this branch superseded the initial SAE-Enterprise recognition backported from `release/0.4.1`, so it now describes the current, corrected behavior rather than that intermediate fix. See `documentation.md#parallel-unreleased-release-branches`'s note on divergence annotations.)*
 - The installer now creates `config.yaml` (and its backups) with restrictive file permissions, since it holds an API key and optionally an SSH password.
 - `SECURITY.md` corrected: SSH host-key verification and TLS certificate trust are disabled by design for this tool, not enforced as previously documented.
 - Coverage-gap warnings are now shown for every neighbor still below the target signal corridor, instead of only when TX power itself hit its hardware limit — a real coverage problem could previously be understated.
