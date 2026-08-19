@@ -2,8 +2,8 @@
 # dev — repo-local convenience wrapper (bash).
 #
 # Commands:
-#   ./dev bootstrap  Install/refresh local dev-only setup (currently: the
-#                    shared commit-msg hook). Safe to re-run any time.
+#   ./dev bootstrap  No-op: no per-repo setup steps currently exist. Kept as
+#                    the standard entry point for future setup needs.
 #   ./dev test       Run the test suite alone (tests/*_test.sh).
 #   ./dev build      No-op: this is a single Bash script with no compile
 #                    step.
@@ -26,7 +26,6 @@ shell_scripts=(
   dev
   scripts/install.sh
   scripts/uninstall.sh
-  scripts/sync-commit-msg-hook.sh
 )
 for f in tests/*.sh; do
   [[ -f "$f" ]] && shell_scripts+=("$f")
@@ -95,9 +94,7 @@ run_tests() {
 }
 
 run_bootstrap() {
-  if [[ -x scripts/sync-commit-msg-hook.sh ]]; then
-    ./scripts/sync-commit-msg-hook.sh
-  fi
+  echo "nothing to bootstrap -- no per-repo setup steps; the shared commit-msg/pre-push hooks are a one-time, machine-wide install, not a per-repo bootstrap step"
 }
 
 run_build() {
