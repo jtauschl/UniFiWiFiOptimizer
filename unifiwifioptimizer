@@ -3435,7 +3435,10 @@ print_scope_note() {
   printf "  and AP-to-AP neighbor scans. It cannot see non-WiFi RF interference\n"
   printf "  (BLE/Zigbee/microwave -- needs a spectrum analyzer), per-client MCS\n"
   printf "  or retry statistics, real client roaming timing, or packet captures.\n"
-  printf "  Recommendations are static-analysis heuristics, not runtime KPIs.\n"
+  printf "  Neighbor RSSI is an AP-to-AP beacon reading, not a client link-budget\n"
+  printf "  proxy -- it cannot detect a weak client's uplink being marginal even\n"
+  printf "  when the corridor looks compliant. Recommendations are static-analysis\n"
+  printf "  heuristics, not runtime KPIs.\n"
 }
 
 # Print a hint explaining why no neighbor data was found, when the channel is DFS.

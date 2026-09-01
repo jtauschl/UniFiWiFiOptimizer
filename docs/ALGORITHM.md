@@ -290,6 +290,7 @@ This is evaluated against the explicitly configured adjacency list, using the co
 
 - uses AP-to-AP RSSI as a proxy for cell overlap
 - evaluates explicitly configured neighbor relationships
+- **AP-to-AP RSSI is not a client link-budget proxy.** Every measurement in this model is a directional AP-beacon reading taken by another AP's radio, not a client uplink or downlink reading. Client devices typically transmit at lower power than AP radios, so a corridor tuned from AP-to-AP RSSI alone can look compliant while a weak client's uplink to the AP is still marginal — the model has no visibility into client-side TX power, antenna gain, or body loss, and cannot detect this asymmetric link-budget case.
 
 ## References
 

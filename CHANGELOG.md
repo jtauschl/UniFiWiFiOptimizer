@@ -26,6 +26,7 @@ goal, not a status recap or an approach detail.
 - Security Protocol recognition for `Enhanced Open (OWE)` and `Enhanced Open with Transition` — previously any open-security WLAN was reported as plain `Open` regardless of its actual OWE encryption state.
 - A line under every ✗ compliance check and TX/roaming/channel recommendation naming exactly where in the UniFi UI to make the change.
 - Scope statement at the end of every run clarifying that this tool works from controller configuration and AP-to-AP neighbor scans, and cannot see non-WiFi RF interference, per-client statistics, real roaming timing, or packet captures.
+- `docs/ALGORITHM.md` and the scope statement now note that neighbor RSSI is an AP-to-AP beacon reading, not a client link-budget proxy, and cannot detect a weak client's uplink being marginal even when the corridor looks compliant.
 
 ### Fixed
 - WLANs using WPA3 Enterprise / WPA2/WPA3 Enterprise no longer have SAE Anti-clogging/Sync Time incorrectly checked against the profile baseline, since Enterprise doesn't use the SAE handshake.
